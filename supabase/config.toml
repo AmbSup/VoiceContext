@@ -1,0 +1,26 @@
+# Minimal scaffold. The Supabase CLI is not installed in this environment,
+# so this was written by hand instead of generated via `supabase init`.
+# Once the CLI is available locally, run `supabase init` in this directory —
+# it will detect the existing supabase/migrations folder and fill in the
+# rest of the default config (studio, auth email templates, etc.) around it.
+# Then `supabase link --project-ref <ref>` to connect to the EU-region
+# project created in Phase 0 of docs/implementation-plan.md.
+
+project_id = "ki-voice-context-engine"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "graphql_public"]
+
+[db]
+port = 54322
+major_version = 15
+
+[studio]
+enabled = true
+port = 54323
+
+[auth]
+enabled = true
+site_url = "http://localhost:3000"

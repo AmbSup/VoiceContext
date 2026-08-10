@@ -1,0 +1,16 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Flutter (once `flutter create .` has been run in mobile/, it writes its
+# own .gitignore for platform build artifacts — this just covers the
+# source-only state before that)
+mobile/.dart_tool/
+mobile/build/
+mobile/*.iml
+
+# Supabase local dev
+supabase/.branches/
+supabase/.temp/
