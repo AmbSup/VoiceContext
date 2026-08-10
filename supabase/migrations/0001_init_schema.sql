@@ -168,9 +168,51 @@ create table memory_entity_links (
 );
 
 -- ---------------------------------------------------------------------
+-- Foreign key indexes — Postgres does not create these automatically.
+-- Every context_space_id column is indexed because it's also the RLS
+-- filter column on that table (see policies below). Composite primary
+-- keys on the join tables already cover their first column, so only the
+-- second column needs an explicit index for the reverse lookup.
+-- ---------------------------------------------------------------------
+create index context_space_members_user_id_idx on context_space_members (user_id);
+
+create index contexts_context_space_id_idx on contexts (context_space_id);
+create index contexts_parent_context_id_idx on contexts (parent_context_id);
+
+create index dialog_sessions_context_space_id_idx on dialog_sessions (context_space_id);
+create index dialog_sessions_user_id_idx on dialog_sessions (user_id);
+create index dialog_sessions_started_context_id_idx on dialog_sessions (started_context_id);
+
+create index documents_context_space_id_idx on documents (context_space_id);
+create index documents_uploaded_by_idx on documents (uploaded_by);
+
+create index segments_context_space_id_idx on segments (context_space_id);
+create index segments_dialog_session_id_idx on segments (dialog_session_id);
+create index segments_document_id_idx on segments (document_id);
+
+create index memory_items_segment_id_idx on memory_items (segment_id);
+create index memory_items_superseded_by_id_idx on memory_items (superseded_by_id);
+create index memory_items_created_by_idx on memory_items (created_by);
+
+create index memory_context_links_context_id_idx on memory_context_links (context_id);
+
+create index entities_context_space_id_idx on entities (context_space_id);
+create index entities_merged_into_entity_id_idx on entities (merged_into_entity_id);
+
+create index entity_aliases_entity_id_idx on entity_aliases (entity_id);
+
+create index entity_merges_source_entity_id_idx on entity_merges (source_entity_id);
+create index entity_merges_target_entity_id_idx on entity_merges (target_entity_id);
+create index entity_merges_merged_by_idx on entity_merges (merged_by);
+
+create index memory_entity_links_entity_id_idx on memory_entity_links (entity_id);
+
+-- ---------------------------------------------------------------------
 -- Row Level Security — scoped by Context Space membership. Written once
 -- against context_space_members so V2 (multiple members) needs no policy
--- changes, only new membership rows.
+-- changes, only new membership rows. auth.uid() is wrapped in `select` in
+-- every policy so Postgres evaluates it once per query instead of once
+-- per row (see supabase-postgres-best-practices: security-rls-performance).
 -- ---------------------------------------------------------------------
 alter table context_spaces enable row level security;
 alter table context_space_members enable row level security;
@@ -186,45 +228,57 @@ alter table entity_merges enable row level security;
 alter table memory_entity_links enable row level security;
 
 create policy "member access" on context_spaces for all
-  using (id in (select context_space_id from context_space_members where user_id = auth.uid()));
+  to authenticated
+  using (id in (select context_space_id from context_space_members where user_id = (select auth.uid())));
 
 create policy "member access" on context_space_members for all
-  using (context_space_id in (select context_space_id from context_space_members where user_id = auth.uid()));
+  to authenticated
+  using (context_space_id in (select context_space_id from context_space_members where user_id = (select auth.uid())));
 
 create policy "member access" on contexts for all
-  using (context_space_id in (select context_space_id from context_space_members where user_id = auth.uid()));
+  to authenticated
+  using (context_space_id in (select context_space_id from context_space_members where user_id = (select auth.uid())));
 
 create policy "member access" on dialog_sessions for all
-  using (context_space_id in (select context_space_id from context_space_members where user_id = auth.uid()));
+  to authenticated
+  using (context_space_id in (select context_space_id from context_space_members where user_id = (select auth.uid())));
 
 create policy "member access" on documents for all
-  using (context_space_id in (select context_space_id from context_space_members where user_id = auth.uid()));
+  to authenticated
+  using (context_space_id in (select context_space_id from context_space_members where user_id = (select auth.uid())));
 
 create policy "member access" on segments for all
-  using (context_space_id in (select context_space_id from context_space_members where user_id = auth.uid()));
+  to authenticated
+  using (context_space_id in (select context_space_id from context_space_members where user_id = (select auth.uid())));
 
 create policy "member access" on memory_items for all
-  using (context_space_id in (select context_space_id from context_space_members where user_id = auth.uid()));
+  to authenticated
+  using (context_space_id in (select context_space_id from context_space_members where user_id = (select auth.uid())));
 
 create policy "member access" on memory_context_links for all
+  to authenticated
   using (memory_item_id in (select id from memory_items where context_space_id in (
-    select context_space_id from context_space_members where user_id = auth.uid()
+    select context_space_id from context_space_members where user_id = (select auth.uid())
   )));
 
 create policy "member access" on entities for all
-  using (context_space_id in (select context_space_id from context_space_members where user_id = auth.uid()));
+  to authenticated
+  using (context_space_id in (select context_space_id from context_space_members where user_id = (select auth.uid())));
 
 create policy "member access" on entity_aliases for all
+  to authenticated
   using (entity_id in (select id from entities where context_space_id in (
-    select context_space_id from context_space_members where user_id = auth.uid()
+    select context_space_id from context_space_members where user_id = (select auth.uid())
   )));
 
 create policy "member access" on entity_merges for all
+  to authenticated
   using (source_entity_id in (select id from entities where context_space_id in (
-    select context_space_id from context_space_members where user_id = auth.uid()
+    select context_space_id from context_space_members where user_id = (select auth.uid())
   )));
 
 create policy "member access" on memory_entity_links for all
+  to authenticated
   using (memory_item_id in (select id from memory_items where context_space_id in (
-    select context_space_id from context_space_members where user_id = auth.uid()
+    select context_space_id from context_space_members where user_id = (select auth.uid())
   )));

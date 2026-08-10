@@ -15,10 +15,10 @@ class RealtimeDialogController {
   final _tokenClient = EphemeralTokenClient();
 
   Future<void> startSession() async {
-    // TODO: fetch ephemeral token, open WebRTC peer connection to
-    // OpenAI's Realtime endpoint (EU-residency routed), register the
-    // zuhoeren/antworten/nachfragen tool handlers.
-    await _tokenClient.fetchEphemeralToken();
+    final realtimeToken = await _tokenClient.fetchEphemeralToken();
+    // TODO: open a WebRTC peer connection to OpenAI's Realtime endpoint
+    // (EU-residency routed) using realtimeToken.token, and register the
+    // zuhoeren/antworten/nachfragen tool handlers (see CONTEXT.md).
   }
 
   Future<void> endSession() async {

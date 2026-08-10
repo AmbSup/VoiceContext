@@ -14,3 +14,8 @@ mobile/*.iml
 # Supabase local dev
 supabase/.branches/
 supabase/.temp/
+
+# Claude Code local state — .claude/skills contains machine-local absolute-
+# path symlinks into .agents/skills (which IS tracked); regenerate here via
+# `npx skills add supabase/agent-skills` instead of committing the symlinks.
+.claude/
