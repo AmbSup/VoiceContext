@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
 import { AppNav } from "@/components/app-nav";
 import { ManualTextForm } from "./manual-text-form";
 import { DocumentUploadForm } from "./document-upload-form";
@@ -13,6 +14,14 @@ export default async function CapturePage() {
   if (!user) {
     redirect("/login");
   }
+
+  const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
+  const { data: contexts } = await supabase
+    .from("contexts")
+    .select("name")
+    .eq("context_space_id", contextSpaceId)
+    .order("name", { ascending: true });
+  const contextNames = (contexts ?? []).map((c) => c.name as string);
 
   return (
     <>
@@ -28,6 +37,14 @@ export default async function CapturePage() {
               beide durchlaufen dieselbe Segmentation-/Extraction-Pipeline.
             </p>
           </div>
+
+          {/* Shared by both forms' "Ziel-Kontext"-Feld (list=context-names) —
+              autocomplete suggestions only, the field stays free text. */}
+          <datalist id="context-names">
+            {contextNames.map((name) => (
+              <option key={name} value={name} />
+            ))}
+          </datalist>
 
           <ManualTextForm />
           <DocumentUploadForm />

@@ -1,7 +1,7 @@
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
-import { NextResponse } from "next/server";
 import { createEmbeddings } from "@/lib/openai";
 import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
+import { corsJson, corsPreflight } from "@/lib/cors";
 
 // Live-targeted Retrieval for the Realtime dialog's "Antworten" state (see
 // docs/implementation-plan.md Phase 2 step 3 / Phase 3). Called by the
@@ -24,13 +24,17 @@ import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
 
 const MATCH_COUNT = 5; // fewer than web Suche's 8 — this rides the live turn-taking latency budget
 
+export async function OPTIONS() {
+  return corsPreflight();
+}
+
 export async function POST(request: Request) {
   const accessToken = request.headers
     .get("authorization")
     ?.replace(/^Bearer\s+/i, "");
 
   if (!accessToken) {
-    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+    return corsJson({ error: "Not authenticated" }, { status: 401 });
   }
 
   const supabase = createSupabaseClient(
@@ -44,7 +48,7 @@ export async function POST(request: Request) {
   } = await supabase.auth.getUser(accessToken);
 
   if (authError || !user) {
-    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+    return corsJson({ error: "Not authenticated" }, { status: 401 });
   }
 
   let query: string | undefined;
@@ -52,10 +56,10 @@ export async function POST(request: Request) {
     const body = await request.json();
     query = (body?.query as string | undefined)?.trim();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    return corsJson({ error: "Invalid JSON body" }, { status: 400 });
   }
   if (!query) {
-    return NextResponse.json({ error: "query is required" }, { status: 400 });
+    return corsJson({ error: "query is required" }, { status: 400 });
   }
 
   const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
@@ -71,8 +75,8 @@ export async function POST(request: Request) {
   );
 
   if (matchError) {
-    return NextResponse.json({ error: matchError.message }, { status: 500 });
+    return corsJson({ error: matchError.message }, { status: 500 });
   }
 
-  return NextResponse.json({ items: matches ?? [] });
+  return corsJson({ items: matches ?? [] });
 }

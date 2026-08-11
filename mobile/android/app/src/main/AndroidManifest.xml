@@ -3,6 +3,14 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- flutter_webrtc's NetworkMonitorAutoDetect calls
+         ConnectivityManager.getActiveNetworkInfo() during peer connection
+         setup; without this permission that throws a SecurityException that
+         the native WebRTC JNI layer doesn't catch, aborting the whole
+         process (SIGABRT, "Fatal error in .../jvm.cc", "Check failed:
+         false") instead of failing gracefully. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <application
         android:label="voice_context_mobile"
         android:name="${applicationName}"

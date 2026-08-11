@@ -1,5 +1,6 @@
 "use server";
 
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
@@ -11,6 +12,41 @@ import {
 export interface CaptureState {
   error?: string;
   success?: RunSegmentationPipelineResult;
+}
+
+// Free-text "Ziel-Kontext" field on both capture forms: the user types a
+// name themselves rather than picking from a list (see the datalist
+// suggestions in capture/page.tsx, which assist but don't constrain the
+// input). Find-or-create by case-insensitive name so re-typing an
+// existing context's name reuses it instead of creating a near-duplicate.
+async function resolveTargetContextId(
+  supabase: SupabaseClient,
+  contextSpaceId: string,
+  rawName: FormDataEntryValue | null,
+): Promise<{ id?: string; error?: string }> {
+  const name = typeof rawName === "string" ? rawName.trim() : "";
+  if (!name) return {};
+
+  const { data: existing, error: lookupError } = await supabase
+    .from("contexts")
+    .select("id")
+    .eq("context_space_id", contextSpaceId)
+    .ilike("name", name)
+    .maybeSingle();
+  if (lookupError) return { error: lookupError.message };
+  if (existing) return { id: existing.id as string };
+
+  const { data: created, error: insertError } = await supabase
+    .from("contexts")
+    .insert({ context_space_id: contextSpaceId, name })
+    .select("id")
+    .single();
+  if (insertError || !created) {
+    return {
+      error: insertError?.message ?? "Kontext konnte nicht angelegt werden",
+    };
+  }
+  return { id: created.id as string };
 }
 
 export async function submitManualText(
@@ -31,6 +67,13 @@ export async function submitManualText(
 
   const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
 
+  const targetContext = await resolveTargetContextId(
+    supabase,
+    contextSpaceId,
+    formData.get("target_context"),
+  );
+  if (targetContext.error) return { error: targetContext.error };
+
   try {
     const result = await runSegmentationPipeline({
       supabase,
@@ -39,9 +82,15 @@ export async function submitManualText(
       safetyIdentifier: user.id,
       sourceType: "manual_text",
       transcript: text,
+      targetContextId: targetContext.id,
     });
     revalidatePath("/inbox");
     revalidatePath("/contexts");
+    // Covers every context detail page, not just the manually typed
+    // target-context — the AI's own classification can link a memory item
+    // to any existing context, and revalidatePath("/contexts") alone does
+    // NOT cascade to its dynamic [id] children (different cache entries).
+    revalidatePath("/contexts/[id]", "page");
     return { success: result };
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) };
@@ -115,6 +164,13 @@ export async function uploadDocument(
     return { error: `Dokument-Eintrag fehlgeschlagen: ${documentError?.message}` };
   }
 
+  const targetContext = await resolveTargetContextId(
+    supabase,
+    contextSpaceId,
+    formData.get("target_context"),
+  );
+  if (targetContext.error) return { error: targetContext.error };
+
   try {
     const result = await runSegmentationPipeline({
       supabase,
@@ -124,9 +180,15 @@ export async function uploadDocument(
       sourceType: "document",
       documentId: documentRow.id,
       transcript: text,
+      targetContextId: targetContext.id,
     });
     revalidatePath("/inbox");
     revalidatePath("/contexts");
+    // Covers every context detail page, not just the manually typed
+    // target-context — the AI's own classification can link a memory item
+    // to any existing context, and revalidatePath("/contexts") alone does
+    // NOT cascade to its dynamic [id] children (different cache entries).
+    revalidatePath("/contexts/[id]", "page");
     return { success: result };
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) };

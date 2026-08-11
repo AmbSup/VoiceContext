@@ -33,6 +33,22 @@ export function ManualTextForm() {
         placeholder="Text hier einfügen — durchläuft dieselbe Segmentation-/Extraction-Pipeline wie ein Dialog-Transkript."
         className="rounded border border-black/[.08] bg-transparent px-3 py-2 text-sm text-black dark:border-white/[.145] dark:text-zinc-50"
       />
+      <div className="flex flex-col gap-1">
+        <label
+          htmlFor="manual-text-target-context"
+          className="text-xs text-zinc-500 dark:text-zinc-500"
+        >
+          Ziel-Kontext (optional — wird angelegt, falls er noch nicht existiert)
+        </label>
+        <input
+          id="manual-text-target-context"
+          type="text"
+          name="target_context"
+          list="context-names"
+          placeholder="z. B. Robotik"
+          className="rounded border border-black/[.08] bg-transparent px-3 py-2 text-sm text-black dark:border-white/[.145] dark:text-zinc-50"
+        />
+      </div>
       <CaptureResultMessage state={state} />
       <button
         type="submit"

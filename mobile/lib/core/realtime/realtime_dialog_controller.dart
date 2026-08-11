@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
@@ -23,6 +24,23 @@ class RealtimeDialogException implements Exception {
   @override
   String toString() => message;
 }
+
+// retrieve_memory (state "antworten") takes a few seconds — a real backend
+// round trip, not just model thinking time (see api/retrieve/route.ts).
+// Confirmed empirically (scripted WebSocket session against the live
+// Realtime API) that the model never bundles spoken content with a
+// function_call in the same response, however the prompt is worded — so
+// asking it nicely in the base instructions to "say something while you
+// search" silently does nothing. Forcing a dedicated response turn with
+// tool_choice: "none" is what actually works: the model is then unable to
+// call a function and says a short natural filler instead.
+const _fillerInstructions =
+    'Sag jetzt ausschließlich einen einzigen kurzen, natürlichen Satz wie '
+    '"Einen Moment bitte" oder "Lass mich kurz nachsehen" — keine weiteren '
+    'Informationen, keine Funktionsaufrufe, nichts anderes.';
+const _continueAfterFillerInstructions =
+    'Rufe jetzt retrieve_memory auf, um die vorhin gestellte Frage zu '
+    'beantworten.';
 
 /// Owns one Dialog-Session's WebRTC connection to the OpenAI Realtime API.
 ///
@@ -51,15 +69,21 @@ class RealtimeDialogController {
   final _stateController =
       StreamController<RealtimeConnectionState>.broadcast();
   final _dialogStateController = StreamController<String>.broadcast();
+  final _audioLevelController = StreamController<double>.broadcast();
+  final _liveTranscriptController = StreamController<String>.broadcast();
 
   RTCPeerConnection? _peerConnection;
   RTCDataChannel? _dataChannel;
   MediaStream? _localStream;
   MediaStream? _remoteStream;
   Completer<void>? _dataChannelOpened;
+  Timer? _audioLevelTimer;
   RealtimeConnectionState _state = RealtimeConnectionState.idle;
   bool _disposed = false;
+  bool _awaitingFillerTurn = false;
   final _transcriptBuffer = StringBuffer();
+  String? _liveTranscriptItemId;
+  final _liveTranscriptBuffer = StringBuffer();
 
   Stream<Map<String, dynamic>> get events => _eventController.stream;
   Stream<RealtimeConnectionState> get states => _stateController.stream;
@@ -68,6 +92,22 @@ class RealtimeDialogController {
   /// the set_dialog_state function tool (see CONTEXT.md "Dialogzustand" and
   /// the `tools` config in web/src/app/api/realtime-token/route.ts).
   Stream<String> get dialogStates => _dialogStateController.stream;
+
+  /// Local microphone input level (0.0-1.0), sampled every 100ms from the
+  /// WebRTC `media-source` stats report while a session is connected — real
+  /// mic amplitude, not a decorative animation, so the UI can show the user
+  /// their voice is actually being picked up in real time.
+  Stream<double> get audioLevels => _audioLevelController.stream;
+
+  /// Live-building text of the user's current/most recent utterance, driven
+  /// by `conversation.item.input_audio_transcription.delta` events (word by
+  /// word, not just after the user stops talking like `.completed` below) —
+  /// NOT yet verified against a live session that delta events actually
+  /// arrive for the configured transcription model; falls back cleanly to
+  /// only updating on `.completed` if they don't. Resets implicitly on the
+  /// first delta of a new utterance — in between, the display simply keeps
+  /// showing the last completed line rather than flashing empty.
+  Stream<String> get liveTranscript => _liveTranscriptController.stream;
   RealtimeConnectionState get state => _state;
   bool get isConnected => _state == RealtimeConnectionState.connected;
 
@@ -86,6 +126,8 @@ class RealtimeDialogController {
     }
 
     _transcriptBuffer.clear();
+    _liveTranscriptItemId = null;
+    _liveTranscriptBuffer.clear();
     _setState(RealtimeConnectionState.connecting);
 
     try {
@@ -160,6 +202,10 @@ class RealtimeDialogController {
         ),
       );
       _setState(RealtimeConnectionState.connected);
+      _audioLevelTimer = Timer.periodic(
+        const Duration(milliseconds: 100),
+        (_) => unawaited(_pollAudioLevel()),
+      );
     } catch (_) {
       _setState(RealtimeConnectionState.failed);
       await _closeRealtimeResources();
@@ -203,6 +249,8 @@ class RealtimeDialogController {
     await _eventController.close();
     await _stateController.close();
     await _dialogStateController.close();
+    await _audioLevelController.close();
+    await _liveTranscriptController.close();
   }
 
   void _configurePeerConnectionCallbacks(RTCPeerConnection peerConnection) {
@@ -236,6 +284,7 @@ class RealtimeDialogController {
         final decoded = jsonDecode(message.text);
         if (decoded is Map<String, dynamic>) {
           _recordTranscript(decoded);
+          _handleLiveUserTranscript(decoded);
           _eventController.add(decoded);
           if (decoded['type'] == 'response.done') {
             unawaited(_handleResponseDone(decoded));
@@ -247,12 +296,69 @@ class RealtimeDialogController {
     };
   }
 
+  /// Polls the local mic's `media-source` WebRTC stat for its real-time
+  /// audioLevel (0.0-1.0) — see webrtc_interface's StatsReport: `type` and
+  /// `values` are a direct passthrough of the native RTCStatsReport, so the
+  /// member name matches the W3C WebRTC stats spec exactly.
+  int _statsDebugCount = 0;
+
+  Future<void> _pollAudioLevel() async {
+    final peerConnection = _peerConnection;
+    if (peerConnection == null || _audioLevelController.isClosed) return;
+    try {
+      final reports = await peerConnection.getStats();
+      if (_statsDebugCount < 5) {
+        _statsDebugCount++;
+        for (final r in reports) {
+          debugPrint('[audiolevel-debug] type=${r.type} values=${r.values}');
+        }
+      }
+      for (final report in reports) {
+        if (report.type == 'media-source' &&
+            report.values['kind'] == 'audio') {
+          final level = (report.values['audioLevel'] as num?)?.toDouble();
+          if (level != null && !_audioLevelController.isClosed) {
+            _audioLevelController.add(level.clamp(0.0, 1.0));
+          }
+          return;
+        }
+      }
+    } catch (_) {
+      // getStats can transiently fail right as the connection is closing —
+      // not worth surfacing, the next poll (or session end) supersedes it.
+    }
+  }
+
   void _recordTranscript(Map<String, dynamic> event) {
     switch (event['type']) {
       case 'conversation.item.input_audio_transcription.completed':
         _transcriptBuffer.writeln('User: ${event['transcript']}');
       case 'response.output_audio_transcript.done':
         _transcriptBuffer.writeln('Assistant: ${event['transcript']}');
+    }
+  }
+
+  /// Feeds [liveTranscript] — separate from _recordTranscript above, which
+  /// only cares about the final per-turn text for the persisted session
+  /// transcript, not the incremental word-by-word view.
+  void _handleLiveUserTranscript(Map<String, dynamic> event) {
+    final itemId = event['item_id'] as String?;
+    if (itemId == null || _liveTranscriptController.isClosed) return;
+
+    switch (event['type']) {
+      case 'conversation.item.input_audio_transcription.delta':
+        if (itemId != _liveTranscriptItemId) {
+          _liveTranscriptItemId = itemId;
+          _liveTranscriptBuffer.clear();
+        }
+        _liveTranscriptBuffer.write(event['delta'] as String? ?? '');
+        _liveTranscriptController.add(_liveTranscriptBuffer.toString());
+      case 'conversation.item.input_audio_transcription.completed':
+        final finalText = event['transcript'] as String?;
+        if (finalText != null) {
+          _liveTranscriptItemId = itemId;
+          _liveTranscriptController.add(finalText);
+        }
     }
   }
 
@@ -267,11 +373,16 @@ class RealtimeDialogController {
   /// response, confirmed empirically (a response containing only a
   /// set_dialog_state call produces no audio at all, regardless of state).
   /// So a follow-up response.create is required whenever the model still
-  /// needs to actually say something afterwards: after retrieve_memory
-  /// (to speak the grounded answer), and after set_dialog_state with
-  /// state "antworten" or "nachfragen" (to move on to retrieve_memory, or
-  /// to voice the clarifying question). Only "zuhoeren" skips the
-  /// follow-up — CONTEXT.md is explicit that no response is wanted there.
+  /// needs to actually say something afterwards: after retrieve_memory (to
+  /// speak the grounded answer), after set_dialog_state with state
+  /// "nachfragen" (to voice the clarifying question), and after
+  /// set_dialog_state with state "antworten" — except that last one is
+  /// routed through a forced filler-only turn first (see
+  /// _fillerInstructions and the `_awaitingFillerTurn` branch below) rather
+  /// than going straight to retrieve_memory, so the user hears something
+  /// almost immediately instead of a few silent seconds while the search
+  /// runs. Only "zuhoeren" skips the follow-up entirely — CONTEXT.md is
+  /// explicit that no response is wanted there.
   Future<void> _handleResponseDone(Map<String, dynamic> event) async {
     final response = event['response'];
     if (response is! Map<String, dynamic>) return;
@@ -282,9 +393,31 @@ class RealtimeDialogController {
         .whereType<Map<String, dynamic>>()
         .where((item) => item['type'] == 'function_call')
         .toList();
+
+    if (_awaitingFillerTurn) {
+      _awaitingFillerTurn = false;
+      // The forced filler-only turn (tool_choice: "none", see below) just
+      // finished. That constraint means it should never contain a
+      // function_call — if it doesn't, nudge the model to actually continue
+      // with the search it deferred; if it somehow does anyway, fall
+      // through to the normal handling below instead of dropping it.
+      if (functionCalls.isEmpty) {
+        try {
+          await sendEvent({
+            'type': 'response.create',
+            'response': {'instructions': _continueAfterFillerInstructions},
+          });
+        } on StateError {
+          // Session ended while the filler was being spoken.
+        }
+        return;
+      }
+    }
+
     if (functionCalls.isEmpty) return;
 
     var needsFollowUpResponse = false;
+    Map<String, dynamic>? followUpResponseOverrides;
 
     for (final call in functionCalls) {
       final name = call['name'] as String? ?? '';
@@ -296,7 +429,16 @@ class RealtimeDialogController {
         case 'set_dialog_state':
           final dialogState = _handleSetDialogState(call);
           outputPayload = jsonEncode({'ok': true});
-          if (dialogState == 'antworten' || dialogState == 'nachfragen') {
+          if (dialogState == 'antworten') {
+            // Force a dedicated filler-only turn next rather than a plain
+            // follow-up — see the constants above for why.
+            needsFollowUpResponse = true;
+            _awaitingFillerTurn = true;
+            followUpResponseOverrides = {
+              'instructions': _fillerInstructions,
+              'tool_choice': 'none',
+            };
+          } else if (dialogState == 'nachfragen') {
             needsFollowUpResponse = true;
           }
         case 'retrieve_memory':
@@ -324,7 +466,11 @@ class RealtimeDialogController {
 
     if (needsFollowUpResponse) {
       try {
-        await sendEvent({'type': 'response.create'});
+        await sendEvent({
+          'type': 'response.create',
+          if (followUpResponseOverrides != null)
+            'response': followUpResponseOverrides,
+        });
       } on StateError {
         // Same as above.
       }
@@ -375,6 +521,9 @@ class RealtimeDialogController {
     final remoteStream = _remoteStream;
     final peerConnection = _peerConnection;
 
+    _audioLevelTimer?.cancel();
+    _audioLevelTimer = null;
+    _awaitingFillerTurn = false;
     _dataChannel = null;
     _localStream = null;
     _remoteStream = null;

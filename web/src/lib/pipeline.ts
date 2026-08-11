@@ -198,6 +198,13 @@ export interface RunSegmentationPipelineParams {
   dialogSessionId?: string;
   documentId?: string;
   transcript: string;
+  // User-picked target context (see web/src/app/capture) — every memory
+  // item this run creates gets linked to it directly, bypassing the
+  // CONTEXT_LINK_AUTO_THRESHOLD check below entirely: that threshold
+  // exists to gate the *model's own guesses*, not an explicit human
+  // choice, so it doesn't apply here. Classification still runs as
+  // normal and may add further links to other contexts alongside this one.
+  targetContextId?: string;
 }
 
 export interface RunSegmentationPipelineResult {
@@ -216,6 +223,7 @@ export async function runSegmentationPipeline({
   dialogSessionId,
   documentId,
   transcript,
+  targetContextId,
 }: RunSegmentationPipelineParams): Promise<RunSegmentationPipelineResult> {
   const trimmed = transcript.trim();
   if (trimmed === "") {
@@ -339,6 +347,20 @@ export async function runSegmentationPipeline({
             context_id: link.context_id,
           });
         }
+      }
+
+      if (
+        targetContextId !== undefined &&
+        !pendingContextLinks.some(
+          (link) =>
+            link.memory_item_id === memoryItemRow.id &&
+            link.context_id === targetContextId,
+        )
+      ) {
+        pendingContextLinks.push({
+          memory_item_id: memoryItemRow.id,
+          context_id: targetContextId,
+        });
       }
     }
   }

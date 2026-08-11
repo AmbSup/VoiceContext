@@ -1,5 +1,5 @@
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
-import { NextResponse } from "next/server";
+import { corsJson, corsPreflight } from "@/lib/cors";
 
 // Mints a short-lived OpenAI Realtime API token for the mobile app's next
 // Dialog-Session (see ADR 0001, docs/implementation-plan.md Phase 2). The
@@ -39,7 +39,7 @@ const TOOLS = [
           type: "string",
           enum: ["zuhoeren", "antworten", "nachfragen"],
           description:
-            'zuhoeren: reine Erfassung, der Nutzer hat nur etwas mitgeteilt oder nachgedacht, keine Antwort nötig — danach NICHT sprechen. antworten: der Nutzer hat eine echte Frage gestellt, die Wissen aus seinem persönlichen Kontext braucht — danach IMMER zuerst retrieve_memory aufrufen, bevor du sprichst. nachfragen: du bist dir bei etwas Wesentlichem unsicher (z. B. worauf sich eine Aussage bezieht) und stellst eine kurze, gezielte Rückfrage — danach direkt sprechen, ohne retrieve_memory.',
+            'zuhoeren: reine Erfassung, der Nutzer hat nur etwas mitgeteilt oder nachgedacht, keine Antwort nötig — danach NICHT sprechen, und frag insbesondere NICHT, ob du dir das merken sollst (das passiert automatisch, unabhängig von einer Antwort darauf). antworten: der Nutzer hat eine echte Frage gestellt. Kannst du sie direkt aus dem bisherigen Verlauf DIESES Gesprächs beantworten (z. B. weil er die nötige Info gerade selbst genannt hat), antworte direkt, ohne retrieve_memory. Brauchst du dafür Wissen aus FRÜHEREN Sessions oder bereits gespeichertes Wissen, das nicht Teil dieses Gesprächs ist, rufe vorher retrieve_memory auf. nachfragen: du bist dir bei etwas Wesentlichem unsicher (z. B. worauf sich eine Aussage bezieht) und stellst eine kurze, gezielte Rückfrage — danach direkt sprechen, ohne retrieve_memory.',
         },
       },
       required: ["state"],
@@ -49,7 +49,7 @@ const TOOLS = [
     type: "function",
     name: "retrieve_memory",
     description:
-      'Durchsucht das persönliche Wissen des Nutzers (Memory-Items aus früheren Gesprächen, Dokumenten und Notizen) per Vektorsuche. Nur aufrufen, nachdem set_dialog_state mit state="antworten" aufgerufen wurde. Formuliere die query als Suchbegriffe für das, wonach du suchst — nicht zwangsläufig die Nutzerfrage wörtlich.',
+      'Durchsucht bereits gespeichertes Wissen aus FRÜHEREN Gesprächen, Dokumenten und Notizen per Vektorsuche — NICHT für Dinge, die der Nutzer gerade erst in diesem laufenden Gespräch gesagt hat (die stehen bereits im Gesprächsverlauf, dafür brauchst du diese Funktion nicht). Nur aufrufen, nachdem set_dialog_state mit state="antworten" aufgerufen wurde, und nur wenn die Antwort wirklich Wissen von außerhalb dieses Gesprächs braucht. Formuliere die query als Suchbegriffe für das, wonach du suchst — nicht zwangsläufig die Nutzerfrage wörtlich.',
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -65,15 +65,19 @@ const TOOLS = [
 ] as const;
 
 function buildInstructions(): string {
-  return `Du bist die Live-Dialog-KI der KI Voice Context Engine — einer persönlichen Wissens-App. Der Nutzer spricht frei mit dir, wie mit einem Kollegen im Auto. Alles, was er sagt, wird als Wissen erfasst (nachgelagert, nicht live — darum musst du dich nicht kümmern).
+  return `Du bist die Live-Dialog-KI der KI Voice Context Engine — einer persönlichen Wissens-App. Der Nutzer spricht frei mit dir, wie mit einem Kollegen im Auto. Alles, was er sagt, wird als Wissen erfasst (nachgelagert, nicht live — darum musst du dich nicht kümmern, und frag ihn auch nie, ob du dir etwas merken sollst: das passiert automatisch im Hintergrund, unabhängig davon, was er auf so eine Frage antworten würde).
 
 In jeder Antwort-Runde gehst du so vor:
 1. Rufe zuerst IMMER set_dialog_state auf und wähle genau einen der drei Zustände:
-   - "zuhoeren": Der Nutzer berichtet, denkt laut nach, trifft eine Aussage oder Entscheidung — es gibt nichts, worauf du sinnvoll antworten müsstest. Sprich in diesem Fall danach NICHT — keine Bestätigung, kein Kommentar, keine Nachfrage.
-   - "antworten": Der Nutzer stellt eine echte Frage, für deren Beantwortung du sein persönliches Wissen brauchst. Rufe danach retrieve_memory auf, bevor du sprichst, und stütze deine gesprochene Antwort ausschließlich auf das, was retrieve_memory liefert. Findet retrieve_memory nichts Passendes, sag das ehrlich, statt zu raten oder aus allgemeinem Wissen zu antworten.
+   - "zuhoeren": Der Nutzer berichtet, denkt laut nach, trifft eine Aussage oder Entscheidung — es gibt nichts, worauf du sinnvoll antworten müsstest. Sprich in diesem Fall danach NICHT — keine Bestätigung, kein Kommentar, keine Nachfrage, und insbesondere keine Frage, ob du dir das merken sollst.
+   - "antworten": Der Nutzer stellt eine echte Frage. Kannst du sie direkt aus dem bisherigen Verlauf DIESES Gesprächs beantworten — z. B. weil er die nötige Info gerade eben selbst genannt hat —, antworte direkt, ohne retrieve_memory; dafür ist dein normales Gesprächsgedächtnis da. Rufe retrieve_memory nur auf, wenn die Antwort Wissen aus FRÜHEREN Sessions oder bereits gespeichertes Wissen braucht, das nicht Teil dieses Gesprächs ist, und stütze dich dann ausschließlich auf das, was retrieve_memory liefert. Findet retrieve_memory nichts Passendes, sag das ehrlich, statt zu raten oder aus allgemeinem Wissen zu antworten.
    - "nachfragen": Du bist dir bei etwas Wesentlichem unsicher, das die Antwort oder die spätere Einordnung des Gesagten betrifft. Stell danach direkt eine kurze, gezielte Rückfrage — keine Retrieval nötig.
 2. Sei bei "antworten" und "nachfragen" kurz und gesprochen-natürlich, wie im echten Gespräch, nicht wie ein Textdokument.
 3. Antworte ausschließlich auf Deutsch.`;
+}
+
+export async function OPTIONS() {
+  return corsPreflight();
 }
 
 export async function POST(request: Request) {
@@ -82,7 +86,7 @@ export async function POST(request: Request) {
     ?.replace(/^Bearer\s+/i, "");
 
   if (!accessToken) {
-    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+    return corsJson({ error: "Not authenticated" }, { status: 401 });
   }
 
   const supabase = createSupabaseClient(
@@ -95,14 +99,14 @@ export async function POST(request: Request) {
   } = await supabase.auth.getUser(accessToken);
 
   if (authError || !user) {
-    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+    return corsJson({ error: "Not authenticated" }, { status: 401 });
   }
 
   const apiKey = process.env.OPENAI_API_KEY;
   const baseUrl = process.env.OPENAI_API_BASE_URL ?? "https://api.openai.com";
 
   if (!apiKey) {
-    return NextResponse.json(
+    return corsJson(
       { error: "OPENAI_API_KEY is not configured" },
       { status: 500 },
     );
@@ -163,14 +167,14 @@ export async function POST(request: Request) {
 
   if (!openaiResponse.ok) {
     const detail = await openaiResponse.text();
-    return NextResponse.json(
+    return corsJson(
       { error: "Failed to mint Realtime token", detail },
       { status: 502 },
     );
   }
 
   const { value, expires_at } = await openaiResponse.json();
-  return NextResponse.json({
+  return corsJson({
     token: value,
     expiresAt: expires_at,
     // Keeps WebRTC signaling on the same regional OpenAI API origin that

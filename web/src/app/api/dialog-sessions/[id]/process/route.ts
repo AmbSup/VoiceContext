@@ -1,6 +1,6 @@
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
-import { NextResponse } from "next/server";
 import { runSegmentationPipeline } from "@/lib/pipeline";
+import { corsJson, corsPreflight } from "@/lib/cors";
 
 // Triggers the shared Segmentation/Extraction/Classification pipeline (see
 // src/lib/pipeline.ts) for a finished Dialog-Session (see
@@ -21,6 +21,10 @@ import { runSegmentationPipeline } from "@/lib/pipeline";
 // same anon-key client so RLS enforces context_space membership naturally
 // — no service-role client involved.
 
+export async function OPTIONS() {
+  return corsPreflight();
+}
+
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
@@ -30,7 +34,7 @@ export async function POST(
     ?.replace(/^Bearer\s+/i, "");
 
   if (!accessToken) {
-    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+    return corsJson({ error: "Not authenticated" }, { status: 401 });
   }
 
   // Passing the user's JWT as the client's Authorization header (not just
@@ -49,7 +53,7 @@ export async function POST(
   } = await supabase.auth.getUser(accessToken);
 
   if (authError || !user) {
-    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+    return corsJson({ error: "Not authenticated" }, { status: 401 });
   }
 
   const { id: dialogSessionId } = await params;
@@ -64,19 +68,19 @@ export async function POST(
   // covers, so a missing row means "not found or not yours" — either way
   // there's nothing more to say than 404.
   if (!session) {
-    return NextResponse.json({ error: "Dialog session not found" }, { status: 404 });
+    return corsJson({ error: "Dialog session not found" }, { status: 404 });
   }
   if (!session.ended_at) {
-    return NextResponse.json(
+    return corsJson(
       { error: "Dialog session has not ended yet" },
       { status: 409 },
     );
   }
   if (session.processing_status === "fertig") {
-    return NextResponse.json({ status: "already_processed" });
+    return corsJson({ status: "already_processed" });
   }
   if (session.processing_status === "laeuft") {
-    return NextResponse.json(
+    return corsJson(
       { error: "Dialog session is already being processed" },
       { status: 409 },
     );
@@ -105,7 +109,7 @@ export async function POST(
       .update({ processing_status: "fertig", processed_at: new Date().toISOString() })
       .eq("id", dialogSessionId);
 
-    return NextResponse.json(result);
+    return corsJson(result);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     await supabase
@@ -115,7 +119,7 @@ export async function POST(
         processing_error: detail.slice(0, 2000),
       })
       .eq("id", dialogSessionId);
-    return NextResponse.json(
+    return corsJson(
       { error: "Failed to process dialog session", detail },
       { status: 502 },
     );
