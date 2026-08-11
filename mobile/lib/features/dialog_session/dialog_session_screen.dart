@@ -21,9 +21,19 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
   final _controller = RealtimeDialogController();
   final _sessionRepository = DialogSessionRepository();
   final _dialogProcessingClient = DialogProcessingClient();
+  StreamSubscription<String>? _dialogStateSubscription;
   String? _dialogSessionId;
+  String? _dialogState;
   bool _sessionActive = false;
   bool _sessionChanging = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _dialogStateSubscription = _controller.dialogStates.listen((dialogState) {
+      if (mounted) setState(() => _dialogState = dialogState);
+    });
+  }
 
   Future<void> _toggleSession() async {
     setState(() => _sessionChanging = true);
@@ -41,6 +51,7 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
           unawaited(_triggerProcessing(sessionId));
         }
       } else {
+        _dialogState = null;
         await _controller.startSession();
         try {
           _dialogSessionId = await _sessionRepository.startSession();
@@ -91,8 +102,16 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
     }
   }
 
+  String _dialogStateLabel(String dialogState) => switch (dialogState) {
+        'zuhoeren' => 'Hört zu',
+        'antworten' => 'Antwortet',
+        'nachfragen' => 'Fragt nach',
+        _ => dialogState,
+      };
+
   @override
   void dispose() {
+    unawaited(_dialogStateSubscription?.cancel());
     unawaited(_controller.dispose());
     super.dispose();
   }
@@ -111,21 +130,33 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
         ],
       ),
       body: Center(
-        child: ElevatedButton.icon(
-          onPressed: _sessionChanging ? null : _toggleSession,
-          icon: _sessionChanging
-              ? const SizedBox.square(
-                  dimension: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : Icon(_sessionActive ? Icons.stop : Icons.mic),
-          label: Text(
-            _sessionChanging
-                ? 'Verbindung wird aufgebaut …'
-                : _sessionActive
-                    ? 'Session beenden'
-                    : 'Session starten',
-          ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ElevatedButton.icon(
+              onPressed: _sessionChanging ? null : _toggleSession,
+              icon: _sessionChanging
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Icon(_sessionActive ? Icons.stop : Icons.mic),
+              label: Text(
+                _sessionChanging
+                    ? 'Verbindung wird aufgebaut …'
+                    : _sessionActive
+                        ? 'Session beenden'
+                        : 'Session starten',
+              ),
+            ),
+            if (_sessionActive && _dialogState != null) ...[
+              const SizedBox(height: 16),
+              Text(
+                _dialogStateLabel(_dialogState!),
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+            ],
+          ],
         ),
       ),
     );

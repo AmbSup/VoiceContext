@@ -5,6 +5,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
 import '../api/ephemeral_token_client.dart';
+import '../api/retrieval_client.dart';
 
 enum RealtimeConnectionState {
   idle,
@@ -31,14 +32,17 @@ class RealtimeDialogException implements Exception {
 class RealtimeDialogController {
   RealtimeDialogController({
     EphemeralTokenClient? tokenClient,
+    RetrievalClient? retrievalClient,
     http.Client? httpClient,
     Uri? realtimeEndpoint,
   })  : _tokenClient = tokenClient ?? EphemeralTokenClient(),
+        _retrievalClient = retrievalClient ?? RetrievalClient(),
         _httpClient = httpClient ?? http.Client(),
         _ownsHttpClient = httpClient == null,
         _realtimeEndpointOverride = realtimeEndpoint;
 
   final EphemeralTokenClient _tokenClient;
+  final RetrievalClient _retrievalClient;
   final http.Client _httpClient;
   final bool _ownsHttpClient;
   final Uri? _realtimeEndpointOverride;
@@ -46,6 +50,7 @@ class RealtimeDialogController {
   final _eventController = StreamController<Map<String, dynamic>>.broadcast();
   final _stateController =
       StreamController<RealtimeConnectionState>.broadcast();
+  final _dialogStateController = StreamController<String>.broadcast();
 
   RTCPeerConnection? _peerConnection;
   RTCDataChannel? _dataChannel;
@@ -58,6 +63,11 @@ class RealtimeDialogController {
 
   Stream<Map<String, dynamic>> get events => _eventController.stream;
   Stream<RealtimeConnectionState> get states => _stateController.stream;
+
+  /// Emits "zuhoeren" / "antworten" / "nachfragen" whenever the model calls
+  /// the set_dialog_state function tool (see CONTEXT.md "Dialogzustand" and
+  /// the `tools` config in web/src/app/api/realtime-token/route.ts).
+  Stream<String> get dialogStates => _dialogStateController.stream;
   RealtimeConnectionState get state => _state;
   bool get isConnected => _state == RealtimeConnectionState.connected;
 
@@ -192,6 +202,7 @@ class RealtimeDialogController {
     }
     await _eventController.close();
     await _stateController.close();
+    await _dialogStateController.close();
   }
 
   void _configurePeerConnectionCallbacks(RTCPeerConnection peerConnection) {
@@ -226,6 +237,9 @@ class RealtimeDialogController {
         if (decoded is Map<String, dynamic>) {
           _recordTranscript(decoded);
           _eventController.add(decoded);
+          if (decoded['type'] == 'response.done') {
+            unawaited(_handleResponseDone(decoded));
+          }
         }
       } on FormatException catch (error, stackTrace) {
         _eventController.addError(error, stackTrace);
@@ -239,6 +253,119 @@ class RealtimeDialogController {
         _transcriptBuffer.writeln('User: ${event['transcript']}');
       case 'response.output_audio_transcript.done':
         _transcriptBuffer.writeln('Assistant: ${event['transcript']}');
+    }
+  }
+
+  /// Dispatches function calls the model made in a just-finished response
+  /// (see the `tools` config in web/src/app/api/realtime-token/route.ts).
+  /// `response.done` already carries each function_call item's complete
+  /// `arguments` string, so there's no need to accumulate
+  /// response.function_call_arguments.delta events separately.
+  ///
+  /// A function_call is its own response turn — the Realtime API never
+  /// bundles spoken/text content alongside a function_call in the same
+  /// response, confirmed empirically (a response containing only a
+  /// set_dialog_state call produces no audio at all, regardless of state).
+  /// So a follow-up response.create is required whenever the model still
+  /// needs to actually say something afterwards: after retrieve_memory
+  /// (to speak the grounded answer), and after set_dialog_state with
+  /// state "antworten" or "nachfragen" (to move on to retrieve_memory, or
+  /// to voice the clarifying question). Only "zuhoeren" skips the
+  /// follow-up — CONTEXT.md is explicit that no response is wanted there.
+  Future<void> _handleResponseDone(Map<String, dynamic> event) async {
+    final response = event['response'];
+    if (response is! Map<String, dynamic>) return;
+    final outputItems = response['output'];
+    if (outputItems is! List) return;
+
+    final functionCalls = outputItems
+        .whereType<Map<String, dynamic>>()
+        .where((item) => item['type'] == 'function_call')
+        .toList();
+    if (functionCalls.isEmpty) return;
+
+    var needsFollowUpResponse = false;
+
+    for (final call in functionCalls) {
+      final name = call['name'] as String? ?? '';
+      final callId = call['call_id'] as String?;
+      if (callId == null) continue;
+
+      final String outputPayload;
+      switch (name) {
+        case 'set_dialog_state':
+          final dialogState = _handleSetDialogState(call);
+          outputPayload = jsonEncode({'ok': true});
+          if (dialogState == 'antworten' || dialogState == 'nachfragen') {
+            needsFollowUpResponse = true;
+          }
+        case 'retrieve_memory':
+          outputPayload = await _handleRetrieveMemory(call);
+          needsFollowUpResponse = true;
+        default:
+          outputPayload = jsonEncode({'error': 'unknown_function: $name'});
+      }
+
+      try {
+        await sendEvent({
+          'type': 'conversation.item.create',
+          'item': {
+            'type': 'function_call_output',
+            'call_id': callId,
+            'output': outputPayload,
+          },
+        });
+      } on StateError {
+        // Session ended/disconnected while we were awaiting retrieval —
+        // nothing left to answer back to.
+        return;
+      }
+    }
+
+    if (needsFollowUpResponse) {
+      try {
+        await sendEvent({'type': 'response.create'});
+      } on StateError {
+        // Same as above.
+      }
+    }
+  }
+
+  /// Returns the reported state (not the function_call_output payload,
+  /// which is always `{'ok': true}` — see the caller in _handleResponseDone,
+  /// which needs the state itself to decide on a follow-up response.create).
+  String _handleSetDialogState(Map<String, dynamic> call) {
+    final args = _decodeArguments(call['arguments']);
+    final dialogState = args['state'] as String? ?? 'unbekannt';
+    if (!_dialogStateController.isClosed) {
+      _dialogStateController.add(dialogState);
+    }
+    return dialogState;
+  }
+
+  Future<String> _handleRetrieveMemory(Map<String, dynamic> call) async {
+    final args = _decodeArguments(call['arguments']);
+    final query = args['query'] as String? ?? '';
+    if (query.isEmpty) {
+      return jsonEncode({'items': <dynamic>[]});
+    }
+    try {
+      final items = await _retrievalClient.retrieve(query);
+      return jsonEncode({'items': items});
+    } catch (error) {
+      return jsonEncode({'error': 'retrieval_failed: $error'});
+    }
+  }
+
+  Map<String, dynamic> _decodeArguments(dynamic raw) {
+    if (raw is! String || raw.isEmpty) return const <String, dynamic>{};
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is Map<String, dynamic>
+          ? decoded
+          : const <String, dynamic>{};
+    } on FormatException {
+      return const <String, dynamic>{};
     }
   }
 

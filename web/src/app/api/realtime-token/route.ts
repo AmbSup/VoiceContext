@@ -17,6 +17,65 @@ import { NextResponse } from "next/server";
 const REALTIME_MODEL = "gpt-realtime";
 const TOKEN_LIFETIME_SECONDS = 600;
 
+// The three Dialogzustaende from CONTEXT.md ("Dialogzustand"), driven by
+// Function-Calling rather than plain prompting so the client (mobile's
+// RealtimeDialogController) gets a structured, reliable signal instead of
+// having to parse spoken/text output. "Aktiver Kontext" (CONTEXT.md) is
+// deliberately NOT implemented yet — retrieve_memory searches the whole
+// Context Space, same as web/src/app/search. Realtime API tool schemas
+// are flat ({type, name, description, parameters}), unlike Chat
+// Completions' nested {type: "function", function: {...}}.
+const TOOLS = [
+  {
+    type: "function",
+    name: "set_dialog_state",
+    description:
+      'Muss als erster Funktionsaufruf in JEDER Antwort-Runde aufgerufen werden, bevor du (falls überhaupt) sprichst oder eine weitere Funktion aufrufst. Legt fest, in welchem der drei Dialogzustände du gerade agierst.',
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        state: {
+          type: "string",
+          enum: ["zuhoeren", "antworten", "nachfragen"],
+          description:
+            'zuhoeren: reine Erfassung, der Nutzer hat nur etwas mitgeteilt oder nachgedacht, keine Antwort nötig — danach NICHT sprechen. antworten: der Nutzer hat eine echte Frage gestellt, die Wissen aus seinem persönlichen Kontext braucht — danach IMMER zuerst retrieve_memory aufrufen, bevor du sprichst. nachfragen: du bist dir bei etwas Wesentlichem unsicher (z. B. worauf sich eine Aussage bezieht) und stellst eine kurze, gezielte Rückfrage — danach direkt sprechen, ohne retrieve_memory.',
+        },
+      },
+      required: ["state"],
+    },
+  },
+  {
+    type: "function",
+    name: "retrieve_memory",
+    description:
+      'Durchsucht das persönliche Wissen des Nutzers (Memory-Items aus früheren Gesprächen, Dokumenten und Notizen) per Vektorsuche. Nur aufrufen, nachdem set_dialog_state mit state="antworten" aufgerufen wurde. Formuliere die query als Suchbegriffe für das, wonach du suchst — nicht zwangsläufig die Nutzerfrage wörtlich.',
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        query: {
+          type: "string",
+          description: "Suchanfrage in Stichworten oder als kurzer Satz.",
+        },
+      },
+      required: ["query"],
+    },
+  },
+] as const;
+
+function buildInstructions(): string {
+  return `Du bist die Live-Dialog-KI der KI Voice Context Engine — einer persönlichen Wissens-App. Der Nutzer spricht frei mit dir, wie mit einem Kollegen im Auto. Alles, was er sagt, wird als Wissen erfasst (nachgelagert, nicht live — darum musst du dich nicht kümmern).
+
+In jeder Antwort-Runde gehst du so vor:
+1. Rufe zuerst IMMER set_dialog_state auf und wähle genau einen der drei Zustände:
+   - "zuhoeren": Der Nutzer berichtet, denkt laut nach, trifft eine Aussage oder Entscheidung — es gibt nichts, worauf du sinnvoll antworten müsstest. Sprich in diesem Fall danach NICHT — keine Bestätigung, kein Kommentar, keine Nachfrage.
+   - "antworten": Der Nutzer stellt eine echte Frage, für deren Beantwortung du sein persönliches Wissen brauchst. Rufe danach retrieve_memory auf, bevor du sprichst, und stütze deine gesprochene Antwort ausschließlich auf das, was retrieve_memory liefert. Findet retrieve_memory nichts Passendes, sag das ehrlich, statt zu raten oder aus allgemeinem Wissen zu antworten.
+   - "nachfragen": Du bist dir bei etwas Wesentlichem unsicher, das die Antwort oder die spätere Einordnung des Gesagten betrifft. Stell danach direkt eine kurze, gezielte Rückfrage — keine Retrieval nötig.
+2. Sei bei "antworten" und "nachfragen" kurz und gesprochen-natürlich, wie im echten Gespräch, nicht wie ein Textdokument.
+3. Antworte ausschließlich auf Deutsch.`;
+}
+
 export async function POST(request: Request) {
   const accessToken = request.headers
     .get("authorization")
@@ -62,6 +121,7 @@ export async function POST(request: Request) {
       session: {
         type: "realtime",
         model: REALTIME_MODEL,
+        instructions: buildInstructions(),
         audio: {
           input: {
             format: { type: "audio/pcm", rate: 24000 },
@@ -84,9 +144,14 @@ export async function POST(request: Request) {
             voice: "alloy",
           },
         },
-        // TODO(Phase 2/3): instructions + tools for the drei Dialogzustaende
-        // (zuhoeren/antworten/nachfragen) and live-targeted Retrieval — see
-        // CONTEXT.md "Dialogzustand" and "Aktiver Kontext".
+        tools: TOOLS,
+        tool_choice: "auto",
+        // Best-effort, not a hard guarantee: nothing in the Realtime API
+        // forces zero audio output for a given response, we can only
+        // instruct the model strongly (see buildInstructions) not to speak
+        // when state="zuhoeren". If this turns out too leaky in practice,
+        // revisit with turn_detection.create_response: false and having
+        // the client decide when to call response.create instead.
         output_modalities: ["audio"],
         // Phase 0 requirement (docs/implementation-plan.md): tracing is not
         // EU-residency-conform, so it must stay off independent of the
