@@ -3,7 +3,9 @@ import Link from "next/link";
 const LINKS = [
   { href: "/", label: "Start" },
   { href: "/contexts", label: "Kontexte" },
+  { href: "/capture", label: "Erfassen" },
   { href: "/inbox", label: "Inbox" },
+  { href: "/search", label: "Suche" },
 ] as const;
 
 export function AppNav({ current }: { current: (typeof LINKS)[number]["href"] }) {

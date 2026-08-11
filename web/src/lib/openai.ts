@@ -48,7 +48,10 @@ export async function createEmbeddings(
 export async function createChatCompletion(params: {
   model: string;
   messages: { role: "system" | "user"; content: string }[];
-  responseSchema: { name: string; schema: object };
+  // Omit for a plain-text answer (used by Retrieval's Answer Engine);
+  // provide to constrain the response to a JSON Schema (used by the
+  // Segmentation/Extraction/Classification pipeline).
+  responseSchema?: { name: string; schema: object };
   safetyIdentifier: string;
 }): Promise<string> {
   const { apiKey, baseUrl } = openaiConfig();
@@ -63,14 +66,18 @@ export async function createChatCompletion(params: {
     body: JSON.stringify({
       model: params.model,
       messages: params.messages,
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: params.responseSchema.name,
-          strict: true,
-          schema: params.responseSchema.schema,
-        },
-      },
+      ...(params.responseSchema
+        ? {
+            response_format: {
+              type: "json_schema",
+              json_schema: {
+                name: params.responseSchema.name,
+                strict: true,
+                schema: params.responseSchema.schema,
+              },
+            },
+          }
+        : {}),
     }),
   });
 
