@@ -70,6 +70,14 @@ export async function POST(request: Request) {
               create_response: true,
               silence_duration_ms: 500,
             },
+            // Without this, conversation.item.input_audio_transcription.*
+            // events never fire and the user's half of the transcript stays
+            // empty (mobile's RealtimeDialogController._recordTranscript
+            // listens for the .completed event). Placement confirmed via
+            // the Realtime API docs for a dedicated transcription session;
+            // NOT yet verified against a live "type": "realtime" session —
+            // check this first if the transcript comes back user-less.
+            transcription: { model: "gpt-transcribe" },
           },
           output: {
             format: { type: "audio/pcm", rate: 24000 },
@@ -80,6 +88,10 @@ export async function POST(request: Request) {
         // (zuhoeren/antworten/nachfragen) and live-targeted Retrieval — see
         // CONTEXT.md "Dialogzustand" and "Aktiver Kontext".
         output_modalities: ["audio"],
+        // Phase 0 requirement (docs/implementation-plan.md): tracing is not
+        // EU-residency-conform, so it must stay off independent of the
+        // pending OpenAI EU-residency approval itself.
+        tracing: null,
       },
     }),
   });
@@ -93,5 +105,11 @@ export async function POST(request: Request) {
   }
 
   const { value, expires_at } = await openaiResponse.json();
-  return NextResponse.json({ token: value, expiresAt: expires_at });
+  return NextResponse.json({
+    token: value,
+    expiresAt: expires_at,
+    // Keeps WebRTC signaling on the same regional OpenAI API origin that
+    // minted the client secret (for example the configured EU endpoint).
+    realtimeUrl: `${baseUrl}/v1/realtime/calls`,
+  });
 }

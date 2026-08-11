@@ -4,10 +4,15 @@ import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 class RealtimeToken {
-  RealtimeToken({required this.token, required this.expiresAt});
+  RealtimeToken({
+    required this.token,
+    required this.expiresAt,
+    this.realtimeEndpoint,
+  });
 
   final String token;
   final DateTime expiresAt;
+  final Uri? realtimeEndpoint;
 }
 
 /// Fetches a short-lived OpenAI Realtime API token from our backend
@@ -46,6 +51,10 @@ class EphemeralTokenClient {
       expiresAt: DateTime.fromMillisecondsSinceEpoch(
         (body['expiresAt'] as int) * 1000,
       ),
+      realtimeEndpoint: switch (body['realtimeUrl']) {
+        final String url => Uri.parse(url),
+        _ => null,
+      },
     );
   }
 }
