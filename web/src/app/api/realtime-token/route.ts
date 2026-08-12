@@ -39,7 +39,7 @@ const TOOLS = [
           type: "string",
           enum: ["zuhoeren", "antworten", "nachfragen"],
           description:
-            'zuhoeren: reine Erfassung, der Nutzer hat nur etwas mitgeteilt oder nachgedacht, keine Antwort nötig — danach NICHT sprechen, und frag insbesondere NICHT, ob du dir das merken sollst (das passiert automatisch, unabhängig von einer Antwort darauf). antworten: der Nutzer hat eine echte Frage gestellt. Kannst du sie direkt aus dem bisherigen Verlauf DIESES Gesprächs beantworten (z. B. weil er die nötige Info gerade selbst genannt hat), antworte direkt, ohne retrieve_memory. Brauchst du dafür Wissen aus FRÜHEREN Sessions oder bereits gespeichertes Wissen, das nicht Teil dieses Gesprächs ist, rufe vorher retrieve_memory auf. nachfragen: du bist dir bei etwas Wesentlichem unsicher (z. B. worauf sich eine Aussage bezieht) und stellst eine kurze, gezielte Rückfrage — danach direkt sprechen, ohne retrieve_memory.',
+            'zuhoeren: reine Erfassung, der Nutzer hat nur etwas mitgeteilt oder nachgedacht, keine Antwort nötig — danach NICHT sprechen, und frag insbesondere NICHT, ob du dir das merken sollst (das passiert automatisch, unabhängig von einer Antwort darauf). antworten: der Nutzer hat eine echte Frage gestellt. Kannst du sie direkt aus dem bisherigen Verlauf DIESES Gesprächs beantworten (z. B. weil er die nötige Info gerade selbst genannt hat), antworte direkt, ohne weitere Funktionsaufrufe. Fragt er nach dem INHALT eines bestimmten, benannten Kontexts (z. B. "was ist alles in Sport Erfolge", "liste meine Elemente in X"), rufe list_context_items auf. Braucht die Antwort sonstiges Wissen aus FRÜHEREN Sessions oder bereits gespeichertes Wissen zu einem Thema, das nicht Teil dieses Gesprächs ist, rufe retrieve_memory auf. nachfragen: du bist dir bei etwas Wesentlichem unsicher (z. B. worauf sich eine Aussage bezieht) und stellst eine kurze, gezielte Rückfrage — danach direkt sprechen, ohne weitere Funktionsaufrufe.',
         },
       },
       required: ["state"],
@@ -62,6 +62,24 @@ const TOOLS = [
       required: ["query"],
     },
   },
+  {
+    type: "function",
+    name: "list_context_items",
+    description:
+      'Listet alle Memory-Items in einem bestimmten, vom Nutzer BENANNTEN Kontext auf (strukturiert, keine Ähnlichkeitssuche) — für Anfragen wie "was ist alles im Kontext Sport Erfolge", "sag mir alle meine Elemente in X", "liste den Kontext Y auf". NICHT für thematische Fragen ohne genannten Kontextnamen — dafür ist retrieve_memory da. Nur aufrufen, nachdem set_dialog_state mit state="antworten" aufgerufen wurde.',
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        context_name: {
+          type: "string",
+          description:
+            'Der vom Nutzer genannte Kontext-Name, so wie gesagt (z. B. "Sport Erfolge").',
+        },
+      },
+      required: ["context_name"],
+    },
+  },
 ] as const;
 
 function buildInstructions(): string {
@@ -70,7 +88,7 @@ function buildInstructions(): string {
 In jeder Antwort-Runde gehst du so vor:
 1. Rufe zuerst IMMER set_dialog_state auf und wähle genau einen der drei Zustände:
    - "zuhoeren": Der Nutzer berichtet, denkt laut nach, trifft eine Aussage oder Entscheidung — es gibt nichts, worauf du sinnvoll antworten müsstest. Sprich in diesem Fall danach NICHT — keine Bestätigung, kein Kommentar, keine Nachfrage, und insbesondere keine Frage, ob du dir das merken sollst.
-   - "antworten": Der Nutzer stellt eine echte Frage. Kannst du sie direkt aus dem bisherigen Verlauf DIESES Gesprächs beantworten — z. B. weil er die nötige Info gerade eben selbst genannt hat —, antworte direkt, ohne retrieve_memory; dafür ist dein normales Gesprächsgedächtnis da. Rufe retrieve_memory nur auf, wenn die Antwort Wissen aus FRÜHEREN Sessions oder bereits gespeichertes Wissen braucht, das nicht Teil dieses Gesprächs ist, und stütze dich dann ausschließlich auf das, was retrieve_memory liefert. Findet retrieve_memory nichts Passendes, sag das ehrlich, statt zu raten oder aus allgemeinem Wissen zu antworten.
+   - "antworten": Der Nutzer stellt eine echte Frage. Kannst du sie direkt aus dem bisherigen Verlauf DIESES Gesprächs beantworten — z. B. weil er die nötige Info gerade eben selbst genannt hat —, antworte direkt, ohne weitere Funktionsaufrufe; dafür ist dein normales Gesprächsgedächtnis da. Nennt der Nutzer einen konkreten Kontext-Namen und will dessen Inhalt wissen (z. B. "was ist alles in Sport Erfolge"), rufe list_context_items auf — das ist ein strukturiertes Auflisten, keine Ähnlichkeitssuche, und funktioniert deshalb auch für generische "zeig mir alles"-Fragen, bei denen retrieve_memory nichts findet. Für sonstiges Wissen aus FRÜHEREN Sessions zu einem Thema, das nicht Teil dieses Gesprächs ist, rufe stattdessen retrieve_memory auf. Stütze dich in beiden Fällen ausschließlich auf das, was die Funktion liefert. Findet sie nichts Passendes, sag das ehrlich, statt zu raten oder aus allgemeinem Wissen zu antworten.
    - "nachfragen": Du bist dir bei etwas Wesentlichem unsicher, das die Antwort oder die spätere Einordnung des Gesagten betrifft. Stell danach direkt eine kurze, gezielte Rückfrage — keine Retrieval nötig.
 2. Sei bei "antworten" und "nachfragen" kurz und gesprochen-natürlich, wie im echten Gespräch, nicht wie ein Textdokument.
 3. Antworte ausschließlich auf Deutsch.`;

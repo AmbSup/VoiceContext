@@ -39,8 +39,9 @@ const _fillerInstructions =
     '"Einen Moment bitte" oder "Lass mich kurz nachsehen" — keine weiteren '
     'Informationen, keine Funktionsaufrufe, nichts anderes.';
 const _continueAfterFillerInstructions =
-    'Rufe jetzt retrieve_memory auf, um die vorhin gestellte Frage zu '
-    'beantworten.';
+    'Rufe jetzt die passende Funktion auf (retrieve_memory für thematische '
+    'Suche, list_context_items falls ein konkreter Kontext-Name genannt '
+    'wurde), um die vorhin gestellte Frage zu beantworten.';
 const _offerHelpInstructions =
     'Sag jetzt ausschlieÃŸlich: "Wie kann ich dir helfen?" Keine '
     'Funktionsaufrufe und nichts anderes.';
@@ -544,6 +545,9 @@ class RealtimeDialogController {
         case 'retrieve_memory':
           outputPayload = await _handleRetrieveMemory(call);
           needsFollowUpResponse = true;
+        case 'list_context_items':
+          outputPayload = await _handleListContextItems(call);
+          needsFollowUpResponse = true;
         default:
           outputPayload = jsonEncode({'error': 'unknown_function: $name'});
       }
@@ -600,6 +604,20 @@ class RealtimeDialogController {
       return jsonEncode({'items': items});
     } catch (error) {
       return jsonEncode({'error': 'retrieval_failed: $error'});
+    }
+  }
+
+  Future<String> _handleListContextItems(Map<String, dynamic> call) async {
+    final args = _decodeArguments(call['arguments']);
+    final contextName = args['context_name'] as String? ?? '';
+    if (contextName.isEmpty) {
+      return jsonEncode({'found': false});
+    }
+    try {
+      final result = await _retrievalClient.listContextItems(contextName);
+      return jsonEncode(result);
+    } catch (error) {
+      return jsonEncode({'error': 'list_context_items_failed: $error'});
     }
   }
 
