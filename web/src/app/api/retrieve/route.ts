@@ -103,20 +103,5 @@ export async function POST(request: Request) {
     }),
   );
 
-  // TEMP diagnostic (remove once the "keine Infos gespeichert" reports are
-  // root-caused): the live model claims empty results for queries that
-  // rank real facts in the top 5 when tested via direct DB access — that
-  // test bypasses RLS though, so this logs what the actual RLS-scoped
-  // route call sees.
-  console.log("[retrieve] diag", {
-    query,
-    contextSpaceId,
-    memoryItemCount: memoryItemsResult.data?.length ?? 0,
-    contextItemCount: contextItems.length,
-    topMemoryItems: (memoryItemsResult.data ?? []).slice(0, 3).map(
-      (m: { content: string; similarity: number }) => ({ content: m.content, similarity: m.similarity }),
-    ),
-  });
-
   return corsJson({ items: [...(memoryItemsResult.data ?? []), ...contextItems] });
 }
