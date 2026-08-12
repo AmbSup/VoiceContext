@@ -49,7 +49,7 @@ const TOOLS = [
     type: "function",
     name: "retrieve_memory",
     description:
-      'Durchsucht bereits gespeichertes Wissen aus FRÜHEREN Gesprächen, Dokumenten und Notizen per Vektorsuche — NICHT für Dinge, die der Nutzer gerade erst in diesem laufenden Gespräch gesagt hat (die stehen bereits im Gesprächsverlauf, dafür brauchst du diese Funktion nicht). Nur aufrufen, nachdem set_dialog_state mit state="antworten" aufgerufen wurde, und nur wenn die Antwort wirklich Wissen von außerhalb dieses Gesprächs braucht. Formuliere die query als Suchbegriffe für das, wonach du suchst — nicht zwangsläufig die Nutzerfrage wörtlich.',
+      'Durchsucht bereits gespeichertes Wissen aus FRÜHEREN Gesprächen, Dokumenten und Notizen per Vektorsuche (sowohl einzelne Memory-Items als auch Kontext-Beschreibungen) — NICHT für Dinge, die der Nutzer gerade erst in diesem laufenden Gespräch gesagt hat (die stehen bereits im Gesprächsverlauf, dafür brauchst du diese Funktion nicht). Nur aufrufen, nachdem set_dialog_state mit state="antworten" aufgerufen wurde, und nur wenn die Antwort wirklich Wissen von außerhalb dieses Gesprächs braucht. Formuliere die query als Suchbegriffe für das, wonach du suchst — nicht zwangsläufig die Nutzerfrage wörtlich.',
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -129,10 +129,20 @@ export async function POST(request: Request) {
         audio: {
           input: {
             format: { type: "audio/pcm", rate: 24000 },
+            // semantic_vad (not server_vad's fixed silence_duration_ms
+            // timeout) scores whether the user actually sounds done
+            // talking, so it's far less likely to fire on background noise
+            // (engine, wind — the car use case from CONTEXT.md) than a
+            // pure silence-timer would. eagerness: "low" biases it further
+            // toward NOT interrupting — trades a bit of extra latency
+            // before the assistant responds for fewer mid-word cutoffs.
+            // interrupt_response stays true: genuine barge-in (the user
+            // deliberately talking over the assistant) should still work.
             turn_detection: {
-              type: "server_vad",
+              type: "semantic_vad",
+              eagerness: "low",
               create_response: true,
-              silence_duration_ms: 500,
+              interrupt_response: true,
             },
             // Without this, conversation.item.input_audio_transcription.*
             // events never fire and the user's half of the transcript stays

@@ -1,8 +1,13 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f5f7fb;
+  --foreground: #172033;
+  --surface: rgba(255, 255, 255, 0.82);
+  --line: rgba(23, 32, 51, 0.09);
+  --muted: #687386;
+  --accent: #6558e8;
+  --accent-2: #1bb6c9;
 }
 
 @theme inline {
@@ -12,15 +17,70 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
+* { box-sizing: border-box; }
+
+html { background: var(--background); }
 
 body {
-  background: var(--background);
+  margin: 0;
+  background:
+    radial-gradient(circle at 12% 0%, rgba(101, 88, 232, .12), transparent 30rem),
+    radial-gradient(circle at 90% 15%, rgba(27, 182, 201, .10), transparent 27rem),
+    var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+button, input, textarea, select { font: inherit; }
+button, a { -webkit-tap-highlight-color: transparent; }
+
+::selection { background: rgba(101, 88, 232, .2); }
+
+.app-page {
+  width: min(100% - 2rem, 72rem);
+  margin-inline: auto;
+  padding-block: clamp(2.5rem, 6vw, 5rem);
+}
+
+.eyebrow {
+  color: var(--accent);
+  font-size: .72rem;
+  font-weight: 750;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+
+.glass-card {
+  border: 1px solid rgba(255,255,255,.76);
+  background: var(--surface);
+  box-shadow: 0 20px 60px rgba(29, 39, 68, .08);
+  backdrop-filter: blur(18px);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0b0d14;
+    --foreground: #f2f4fa;
+    --surface: rgba(20, 23, 34, .82);
+    --line: rgba(255, 255, 255, .1);
+    --muted: #9ca5b7;
+  }
+  body {
+    background:
+      radial-gradient(circle at 12% 0%, rgba(101, 88, 232, .19), transparent 30rem),
+      radial-gradient(circle at 90% 15%, rgba(27, 182, 201, .12), transparent 27rem),
+      var(--background);
+  }
+  .glass-card { border-color: rgba(255,255,255,.09); }
+}
+
+@media (max-width: 640px) {
+  .app-page { width: min(100% - 1.25rem, 72rem); padding-block: 2rem; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes orb-float { 50% { transform: translateY(-10px) scale(1.025); } }
+  @keyframes orb-spin { to { transform: rotate(360deg); } }
+  .orb-float { animation: orb-float 4s ease-in-out infinite; }
+  .orb-spin { animation: orb-spin 9s linear infinite; }
 }

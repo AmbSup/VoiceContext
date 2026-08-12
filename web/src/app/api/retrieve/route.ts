@@ -15,6 +15,13 @@ import { corsJson, corsPreflight } from "@/lib/cors";
 // "Aktiver Kontext" scoping (CONTEXT.md) is intentionally out of scope for
 // now — this searches the whole Context Space, same as the web Suche.
 //
+// Also searches Kontext name/description (match_contexts, see
+// supabase/migrations/0011_context_embeddings.sql): CONTEXT.md treats a
+// Kontext as "nur" an organizing node, not a knowledge container, but in
+// practice a fact typed only into a Beschreibung (never captured as an
+// actual Memory-Item) was otherwise invisible to Retrieval — confirmed by
+// a user hitting exactly that wall.
+//
 // Auth follows the same cross-origin Bearer-token pattern as every other
 // mobile-facing route (see api/realtime-token/route.ts): the client's own
 // Supabase access token both authenticates the request and is forwarded
@@ -23,6 +30,7 @@ import { corsJson, corsPreflight } from "@/lib/cors";
 // it to this client's own outgoing requests.
 
 const MATCH_COUNT = 5; // fewer than web Suche's 8 — this rides the live turn-taking latency budget
+const CONTEXT_MATCH_COUNT = 3;
 
 export async function OPTIONS() {
   return corsPreflight();
@@ -65,18 +73,35 @@ export async function POST(request: Request) {
   const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
   const [queryEmbedding] = await createEmbeddings([query], user.id);
 
-  const { data: matches, error: matchError } = await supabase.rpc(
-    "match_memory_items",
-    {
+  const [memoryItemsResult, contextsResult] = await Promise.all([
+    supabase.rpc("match_memory_items", {
       query_embedding: queryEmbedding,
       match_context_space_id: contextSpaceId,
       match_count: MATCH_COUNT,
-    },
-  );
+    }),
+    supabase.rpc("match_contexts", {
+      query_embedding: queryEmbedding,
+      match_context_space_id: contextSpaceId,
+      match_count: CONTEXT_MATCH_COUNT,
+    }),
+  ]);
 
-  if (matchError) {
-    return corsJson({ error: matchError.message }, { status: 500 });
+  if (memoryItemsResult.error) {
+    return corsJson({ error: memoryItemsResult.error.message }, { status: 500 });
+  }
+  if (contextsResult.error) {
+    return corsJson({ error: contextsResult.error.message }, { status: 500 });
   }
 
-  return corsJson({ items: matches ?? [] });
+  const contextItems = (contextsResult.data ?? []).map(
+    (context: { id: string; name: string; description: string | null }) => ({
+      id: context.id,
+      type: "kontext_beschreibung",
+      content: context.description
+        ? `${context.name}: ${context.description}`
+        : context.name,
+    }),
+  );
+
+  return corsJson({ items: [...(memoryItemsResult.data ?? []), ...contextItems] });
 }

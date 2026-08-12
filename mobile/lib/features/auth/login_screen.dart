@@ -15,6 +15,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _submitting = false;
+  bool _passwordVisible = false;
   String? _error;
 
   @override
@@ -81,8 +82,23 @@ class _LoginScreenState extends State<LoginScreen> {
                   const SizedBox(height: 12),
                   TextFormField(
                     controller: _passwordController,
-                    obscureText: true,
-                    decoration: const InputDecoration(labelText: 'Passwort'),
+                    obscureText: !_passwordVisible,
+                    decoration: InputDecoration(
+                      labelText: 'Passwort',
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          _passwordVisible
+                              ? Icons.visibility_off
+                              : Icons.visibility,
+                        ),
+                        tooltip: _passwordVisible
+                            ? 'Passwort verbergen'
+                            : 'Passwort anzeigen',
+                        onPressed: () => setState(
+                          () => _passwordVisible = !_passwordVisible,
+                        ),
+                      ),
+                    ),
                     validator: (value) => (value == null || value.length < 6)
                         ? 'Mindestens 6 Zeichen'
                         : null,

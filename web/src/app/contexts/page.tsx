@@ -5,6 +5,14 @@ import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
 import { AppNav } from "@/components/app-nav";
 import { NewContextForm } from "./new-context-form";
 
+interface ContextRow {
+  id: string;
+  name: string;
+  description: string | null;
+  created_at: string;
+  memory_context_links: { count: number }[];
+}
+
 export default async function ContextsPage() {
   const supabase = await createClient();
   const {
@@ -19,19 +27,20 @@ export default async function ContextsPage() {
 
   const { data: contexts } = await supabase
     .from("contexts")
-    .select("id, name, description, created_at")
+    .select("id, name, description, created_at, memory_context_links(count)")
     .eq("context_space_id", contextSpaceId)
     .order("created_at", { ascending: true });
 
   return (
     <>
       <AppNav current="/contexts" />
-      <div className="flex flex-1 flex-col items-center gap-8 bg-zinc-50 px-6 py-12 dark:bg-black">
-        <div className="w-full max-w-xl">
-          <h1 className="text-xl font-semibold text-black dark:text-zinc-50">
+      <main className="app-page flex flex-1 flex-col items-center">
+        <div className="w-full max-w-3xl">
+          <p className="eyebrow">Wissensstruktur</p>
+          <h1 className="mt-3 text-4xl font-semibold tracking-tight text-black dark:text-zinc-50">
             Kontexte
           </h1>
-          <p className="mb-6 text-sm text-zinc-600 dark:text-zinc-400">
+          <p className="mb-8 mt-2 text-base text-zinc-600 dark:text-zinc-400">
             Organisationsknoten innerhalb deiner Context Space (siehe
             CONTEXT.md).
           </p>
@@ -44,26 +53,34 @@ export default async function ContextsPage() {
                 Noch keine Kontexte angelegt.
               </li>
             )}
-            {(contexts ?? []).map((context) => (
+            {((contexts ?? []) as ContextRow[]).map((context) => {
+              const itemCount = context.memory_context_links[0]?.count ?? 0;
+              return (
               <li key={context.id}>
                 <Link
                   href={`/contexts/${context.id}`}
-                  className="block rounded-lg border border-black/[.08] bg-white p-4 transition-colors hover:bg-zinc-50 dark:border-white/[.145] dark:bg-zinc-950 dark:hover:bg-zinc-900"
+                  className="glass-card flex items-center justify-between gap-4 rounded-2xl p-5 transition duration-200 hover:-translate-y-0.5"
                 >
-                  <p className="font-medium text-black dark:text-zinc-50">
-                    {context.name}
-                  </p>
-                  {context.description && (
-                    <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-                      {context.description}
+                  <div className="min-w-0">
+                    <p className="font-semibold text-black dark:text-zinc-50">
+                      {context.name}
                     </p>
-                  )}
+                    {context.description && (
+                      <p className="mt-1 truncate text-sm text-zinc-600 dark:text-zinc-400">
+                        {context.description}
+                      </p>
+                    )}
+                  </div>
+                  <span className="shrink-0 rounded-full bg-violet-500/10 px-3 py-1.5 text-sm font-semibold text-violet-700 dark:text-violet-300">
+                    {itemCount.toLocaleString("de-DE")} {itemCount === 1 ? "Item" : "Items"}
+                  </span>
                 </Link>
               </li>
-            ))}
+              );
+            })}
           </ul>
         </div>
-      </div>
+      </main>
     </>
   );
 }

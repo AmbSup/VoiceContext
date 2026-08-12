@@ -42,4 +42,35 @@ class DialogSessionRepository {
         'full_transcript': fullTranscript,
     }).eq('id', dialogSessionId);
   }
+
+  /// Persists RealtimeDialogController.eventLog for debugging live-dialog
+  /// issues (VAD-triggered interruptions, token usage over a session) — see
+  /// supabase/migrations/0012_dialog_session_events.sql. Text/JSON only,
+  /// the controller already filtered out raw-audio-bearing events before
+  /// this is called.
+  Future<void> logEvents(
+    String dialogSessionId,
+    List<Map<String, dynamic>> events,
+  ) async {
+    if (events.isEmpty) return;
+
+    final session = await _client
+        .from('dialog_sessions')
+        .select('context_space_id')
+        .eq('id', dialogSessionId)
+        .single();
+    final contextSpaceId = session['context_space_id'] as String;
+
+    final rows = [
+      for (var i = 0; i < events.length; i++)
+        {
+          'context_space_id': contextSpaceId,
+          'dialog_session_id': dialogSessionId,
+          'sequence': i,
+          'event_type': events[i]['type'] as String? ?? 'unknown',
+          'payload': events[i],
+        },
+    ];
+    await _client.from('dialog_session_events').insert(rows);
+  }
 }

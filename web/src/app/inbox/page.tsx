@@ -58,12 +58,13 @@ export default async function InboxPage() {
   return (
     <>
       <AppNav current="/inbox" />
-      <div className="flex flex-1 flex-col items-center gap-8 bg-zinc-50 px-6 py-12 dark:bg-black">
-        <div className="w-full max-w-2xl">
-          <h1 className="text-xl font-semibold text-black dark:text-zinc-50">
+      <main className="app-page flex flex-1 flex-col items-center">
+        <div className="w-full max-w-3xl">
+          <p className="eyebrow">Eingang</p>
+          <h1 className="mt-3 text-4xl font-semibold tracking-tight text-black dark:text-zinc-50">
             Inbox
           </h1>
-          <p className="mb-6 text-sm text-zinc-600 dark:text-zinc-400">
+          <p className="mb-8 mt-2 text-base text-zinc-600 dark:text-zinc-400">
             Memory-Items, die beim Erfassen keinem Kontext zugeordnet werden
             konnten. Ordne sie hier manuell zu.
           </p>
@@ -114,7 +115,7 @@ export default async function InboxPage() {
             })}
           </ul>
         </div>
-      </div>
+      </main>
     </>
   );
 }

@@ -41,6 +41,20 @@ const _fillerInstructions =
 const _continueAfterFillerInstructions =
     'Rufe jetzt retrieve_memory auf, um die vorhin gestellte Frage zu '
     'beantworten.';
+const _offerHelpInstructions =
+    'Sag jetzt ausschlieÃŸlich: "Wie kann ich dir helfen?" Keine '
+    'Funktionsaufrufe und nichts anderes.';
+const _listeningTurnsBeforeHelpOffer = 3;
+
+// Event types that carry raw audio bytes (base64) rather than just
+// metadata/text — excluded from [RealtimeDialogController.eventLog]. Text
+// events (transcripts, function calls, response.done's token usage, VAD
+// timing) are kept; this is the only filter needed to keep that log
+// audio-free, see supabase/migrations/0012_dialog_session_events.sql.
+const _rawAudioEventTypes = {
+  'response.output_audio.delta',
+  'response.audio.delta', // older API naming, excluded defensively too
+};
 
 /// Owns one Dialog-Session's WebRTC connection to the OpenAI Realtime API.
 ///
@@ -71,6 +85,7 @@ class RealtimeDialogController {
   final _dialogStateController = StreamController<String>.broadcast();
   final _audioLevelController = StreamController<double>.broadcast();
   final _liveTranscriptController = StreamController<String>.broadcast();
+  final _thinkingController = StreamController<bool>.broadcast();
 
   RTCPeerConnection? _peerConnection;
   RTCDataChannel? _dataChannel;
@@ -81,9 +96,12 @@ class RealtimeDialogController {
   RealtimeConnectionState _state = RealtimeConnectionState.idle;
   bool _disposed = false;
   bool _awaitingFillerTurn = false;
+  bool _isThinking = false;
+  int _consecutiveListeningTurns = 0;
   final _transcriptBuffer = StringBuffer();
   String? _liveTranscriptItemId;
   final _liveTranscriptBuffer = StringBuffer();
+  final _eventLog = <Map<String, dynamic>>[];
 
   Stream<Map<String, dynamic>> get events => _eventController.stream;
   Stream<RealtimeConnectionState> get states => _stateController.stream;
@@ -98,6 +116,10 @@ class RealtimeDialogController {
   /// mic amplitude, not a decorative animation, so the UI can show the user
   /// their voice is actually being picked up in real time.
   Stream<double> get audioLevels => _audioLevelController.stream;
+
+  /// True while the user's completed turn is being processed and until the
+  /// assistant starts producing audio (or decides that no reply is needed).
+  Stream<bool> get thinking => _thinkingController.stream;
 
   /// Live-building text of the user's current/most recent utterance, driven
   /// by `conversation.item.input_audio_transcription.delta` events (word by
@@ -119,6 +141,13 @@ class RealtimeDialogController {
   /// Engine, see docs/implementation-plan.md Phase 2.
   String get transcript => _transcriptBuffer.toString();
 
+  /// Every event received this session, minus raw-audio-bearing ones (see
+  /// [_rawAudioEventTypes]) — text/JSON only. Feeds
+  /// dialog_session_events for debugging live-dialog issues (VAD-triggered
+  /// interruptions, token usage over a session), never sent anywhere until
+  /// the caller explicitly persists it after the session ends.
+  List<Map<String, dynamic>> get eventLog => List.unmodifiable(_eventLog);
+
   Future<void> startSession() async {
     _ensureNotDisposed();
     if (_state != RealtimeConnectionState.idle) {
@@ -128,6 +157,9 @@ class RealtimeDialogController {
     _transcriptBuffer.clear();
     _liveTranscriptItemId = null;
     _liveTranscriptBuffer.clear();
+    _eventLog.clear();
+    _consecutiveListeningTurns = 0;
+    _setThinking(false);
     _setState(RealtimeConnectionState.connecting);
 
     try {
@@ -202,6 +234,7 @@ class RealtimeDialogController {
         ),
       );
       _setState(RealtimeConnectionState.connected);
+      await _sendGreeting();
       _audioLevelTimer = Timer.periodic(
         const Duration(milliseconds: 100),
         (_) => unawaited(_pollAudioLevel()),
@@ -212,6 +245,26 @@ class RealtimeDialogController {
       _setState(RealtimeConnectionState.idle);
       rethrow;
     }
+  }
+
+  Future<void> _sendGreeting() async {
+    final hour = DateTime.now().hour;
+    final greeting = hour < 11
+        ? 'Guten Morgen'
+        : hour < 18
+            ? 'Guten Tag'
+            : 'Guten Abend';
+
+    await sendEvent({
+      'type': 'response.create',
+      'response': {
+        'input': <dynamic>[],
+        'instructions':
+            'Sag jetzt ausschlieÃŸlich: "$greeting. Was steht heute an?" '
+                'Keine Funktionsaufrufe und nichts anderes.',
+        'tool_choice': 'none',
+      },
+    });
   }
 
   /// Sends a documented Realtime client event over the `oai-events` channel.
@@ -251,6 +304,7 @@ class RealtimeDialogController {
     await _dialogStateController.close();
     await _audioLevelController.close();
     await _liveTranscriptController.close();
+    await _thinkingController.close();
   }
 
   void _configurePeerConnectionCallbacks(RTCPeerConnection peerConnection) {
@@ -283,8 +337,10 @@ class RealtimeDialogController {
       try {
         final decoded = jsonDecode(message.text);
         if (decoded is Map<String, dynamic>) {
+          _recordEvent(decoded);
           _recordTranscript(decoded);
           _handleLiveUserTranscript(decoded);
+          _handleThinkingState(decoded);
           _eventController.add(decoded);
           if (decoded['type'] == 'response.done') {
             unawaited(_handleResponseDone(decoded));
@@ -294,6 +350,17 @@ class RealtimeDialogController {
         _eventController.addError(error, stackTrace);
       }
     };
+  }
+
+  void _handleThinkingState(Map<String, dynamic> event) {
+    switch (event['type']) {
+      case 'input_audio_buffer.speech_stopped':
+        _setThinking(true);
+      case 'response.output_audio.delta':
+      case 'response.audio.delta':
+      case 'error':
+        _setThinking(false);
+    }
   }
 
   /// Polls the local mic's `media-source` WebRTC stat for its real-time
@@ -314,8 +381,7 @@ class RealtimeDialogController {
         }
       }
       for (final report in reports) {
-        if (report.type == 'media-source' &&
-            report.values['kind'] == 'audio') {
+        if (report.type == 'media-source' && report.values['kind'] == 'audio') {
           final level = (report.values['audioLevel'] as num?)?.toDouble();
           if (level != null && !_audioLevelController.isClosed) {
             _audioLevelController.add(level.clamp(0.0, 1.0));
@@ -327,6 +393,21 @@ class RealtimeDialogController {
       // getStats can transiently fail right as the connection is closing —
       // not worth surfacing, the next poll (or session end) supersedes it.
     }
+  }
+
+  // Wall-clock time when THIS client received the event is the only timing
+  // signal available for later latency analysis — most Realtime API event
+  // types carry no timestamp of their own, and the DB row's created_at
+  // reflects the bulk insert at session end, not when the event actually
+  // happened (see DialogSessionRepository.logEvents).
+  void _recordEvent(Map<String, dynamic> event) {
+    final type = event['type'];
+    if (_rawAudioEventTypes.contains(type)) return;
+    _eventLog.add({
+      'received_at': DateTime.now().toUtc().toIso8601String(),
+      'type': type,
+      'event': event,
+    });
   }
 
   void _recordTranscript(Map<String, dynamic> event) {
@@ -381,8 +462,9 @@ class RealtimeDialogController {
   /// _fillerInstructions and the `_awaitingFillerTurn` branch below) rather
   /// than going straight to retrieve_memory, so the user hears something
   /// almost immediately instead of a few silent seconds while the search
-  /// runs. Only "zuhoeren" skips the follow-up entirely — CONTEXT.md is
-  /// explicit that no response is wanted there.
+  /// runs. "zuhoeren" normally skips the follow-up. After several
+  /// consecutive listening-only turns, the client deliberately adds one
+  /// brief help offer so a longer session does not feel abandoned.
   Future<void> _handleResponseDone(Map<String, dynamic> event) async {
     final response = event['response'];
     if (response is! Map<String, dynamic>) return;
@@ -402,6 +484,7 @@ class RealtimeDialogController {
       // with the search it deferred; if it somehow does anyway, fall
       // through to the normal handling below instead of dropping it.
       if (functionCalls.isEmpty) {
+        _setThinking(true);
         try {
           await sendEvent({
             'type': 'response.create',
@@ -414,7 +497,10 @@ class RealtimeDialogController {
       }
     }
 
-    if (functionCalls.isEmpty) return;
+    if (functionCalls.isEmpty) {
+      _setThinking(false);
+      return;
+    }
 
     var needsFollowUpResponse = false;
     Map<String, dynamic>? followUpResponseOverrides;
@@ -430,6 +516,7 @@ class RealtimeDialogController {
           final dialogState = _handleSetDialogState(call);
           outputPayload = jsonEncode({'ok': true});
           if (dialogState == 'antworten') {
+            _consecutiveListeningTurns = 0;
             // Force a dedicated filler-only turn next rather than a plain
             // follow-up — see the constants above for why.
             needsFollowUpResponse = true;
@@ -439,7 +526,20 @@ class RealtimeDialogController {
               'tool_choice': 'none',
             };
           } else if (dialogState == 'nachfragen') {
+            _consecutiveListeningTurns = 0;
             needsFollowUpResponse = true;
+          } else if (dialogState == 'zuhoeren') {
+            _consecutiveListeningTurns++;
+            if (_consecutiveListeningTurns >= _listeningTurnsBeforeHelpOffer) {
+              _consecutiveListeningTurns = 0;
+              needsFollowUpResponse = true;
+              followUpResponseOverrides = {
+                'instructions': _offerHelpInstructions,
+                'tool_choice': 'none',
+              };
+            } else {
+              _setThinking(false);
+            }
           }
         case 'retrieve_memory':
           outputPayload = await _handleRetrieveMemory(call);
@@ -524,6 +624,7 @@ class RealtimeDialogController {
     _audioLevelTimer?.cancel();
     _audioLevelTimer = null;
     _awaitingFillerTurn = false;
+    _setThinking(false);
     _dataChannel = null;
     _localStream = null;
     _remoteStream = null;
@@ -544,6 +645,14 @@ class RealtimeDialogController {
     _state = value;
     if (!_stateController.isClosed) {
       _stateController.add(value);
+    }
+  }
+
+  void _setThinking(bool value) {
+    if (_isThinking == value) return;
+    _isThinking = value;
+    if (!_thinkingController.isClosed) {
+      _thinkingController.add(value);
     }
   }
 

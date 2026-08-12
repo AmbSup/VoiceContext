@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
+import { createEmbeddings } from "@/lib/openai";
 
 export async function createContext(
   _state: string | undefined,
@@ -25,10 +26,26 @@ export async function createContext(
 
   const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
 
+  // Embedded so Retrieval (Suche, live retrieve_memory) can find facts
+  // typed only into the Beschreibung, not just actual Memory-Items — see
+  // supabase/migrations/0011_context_embeddings.sql. Best-effort: a failed
+  // embedding call shouldn't block creating the context itself, it just
+  // stays unsearchable until a later backfill.
+  let embedding: number[] | undefined;
+  try {
+    [embedding] = await createEmbeddings(
+      [description ? `${name}: ${description}` : name],
+      user.id,
+    );
+  } catch (error) {
+    console.error("Failed to embed new context:", error);
+  }
+
   const { error } = await supabase.from("contexts").insert({
     context_space_id: contextSpaceId,
     name,
     description,
+    embedding,
   });
 
   if (error) {

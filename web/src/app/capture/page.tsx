@@ -26,13 +26,14 @@ export default async function CapturePage() {
   return (
     <>
       <AppNav current="/capture" />
-      <div className="flex flex-1 flex-col items-center gap-8 bg-zinc-50 px-6 py-12 dark:bg-black">
-        <div className="flex w-full max-w-xl flex-col gap-6">
+      <main className="app-page flex flex-1 flex-col items-center">
+        <div className="flex w-full max-w-3xl flex-col gap-6">
           <div>
-            <h1 className="text-xl font-semibold text-black dark:text-zinc-50">
+            <p className="eyebrow">Neuer Inhalt</p>
+            <h1 className="mt-3 text-4xl font-semibold tracking-tight text-black dark:text-zinc-50">
               Erfassen
             </h1>
-            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+            <p className="mt-2 text-base text-zinc-600 dark:text-zinc-400">
               Text und Dokumente sind gleichwertige Inputs zum Sprachdialog —
               beide durchlaufen dieselbe Segmentation-/Extraction-Pipeline.
             </p>
@@ -49,7 +50,7 @@ export default async function CapturePage() {
           <ManualTextForm />
           <DocumentUploadForm />
         </div>
-      </div>
+      </main>
     </>
   );
 }
