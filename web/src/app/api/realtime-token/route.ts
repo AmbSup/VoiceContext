@@ -279,18 +279,24 @@ export async function POST(request: Request) {
         audio: {
           input: {
             format: { type: "audio/pcm", rate: 24000 },
-            // semantic_vad (not server_vad's fixed silence_duration_ms
-            // timeout) scores whether the user actually sounds done
-            // talking, so it's far less likely to fire on background noise
-            // (engine, wind — the car use case from CONTEXT.md) than a
-            // pure silence-timer would. eagerness: "low" biases it further
-            // toward NOT interrupting — trades a bit of extra latency
-            // before the assistant responds for fewer mid-word cutoffs.
-            // interrupt_response stays true: genuine barge-in (the user
-            // deliberately talking over the assistant) should still work.
+            // Was semantic_vad (scores whether the user actually sounds
+            // done talking, so it's less prone to firing on background
+            // noise — engine, wind, the car use case from CONTEXT.md — than
+            // a silence-timer). Switched to server_vad after a live session
+            // showed the known OpenAI-side reliability gap: semantic_vad
+            // can silently stop emitting input_audio_buffer.speech_started
+            // for the rest of a session (confirmed as a widely reported
+            // issue on the OpenAI developer forum, not something under our
+            // control) — one bad detection then permanently kills the
+            // user's ability to speak again. server_vad's fixed
+            // silence_duration_ms is more prone to false triggers on
+            // background noise, but it does not have that failure mode.
+            // Revisit if OpenAI fixes semantic_vad's reliability.
             turn_detection: {
-              type: "semantic_vad",
-              eagerness: "low",
+              type: "server_vad",
+              threshold: 0.5,
+              prefix_padding_ms: 300,
+              silence_duration_ms: 600,
               create_response: true,
               interrupt_response: true,
             },
@@ -299,9 +305,11 @@ export async function POST(request: Request) {
             // empty (mobile's RealtimeDialogController._recordTranscript
             // listens for the .completed event). Placement confirmed via
             // the Realtime API docs for a dedicated transcription session;
-            // NOT yet verified against a live "type": "realtime" session —
-            // check this first if the transcript comes back user-less.
-            transcription: { model: "gpt-transcribe" },
+            // confirmed working against a live "type": "realtime" session.
+            // language: "de" pins the expected language — without it the
+            // model auto-detects per utterance and occasionally mistakes
+            // German speech for English, especially on short utterances.
+            transcription: { model: "gpt-transcribe", language: "de" },
           },
           output: {
             format: { type: "audio/pcm", rate: 24000 },
