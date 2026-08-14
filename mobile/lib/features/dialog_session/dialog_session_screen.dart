@@ -41,6 +41,7 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
   StreamSubscription<bool>? _thinkingSubscription;
   StreamSubscription<String>? _processingActivitySubscription;
   StreamSubscription<ActiveContext?>? _activeContextSubscription;
+  StreamSubscription<RealtimeConnectionState>? _connectionStateSubscription;
   String? _dialogSessionId;
   String? _dialogState;
   String _liveTranscript = '';
@@ -84,6 +85,62 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
         _controller.activeContexts.listen((activeContext) {
       if (mounted) setState(() => _activeContext = activeContext);
     });
+    // Without this, a silently dropped WebRTC connection (ICE failure,
+    // backgrounding, a mobile-network hiccup — all common after a minute or
+    // two of a live session) leaves the UI showing "listening" forever: the
+    // user keeps talking into a dead session with no feedback and no way to
+    // tell it apart from the app just not responding. Every function-call
+    // send already fails silently once disconnected (see
+    // RealtimeDialogController._handleResponseDone's `on StateError` catches
+    // around sendEvent), so this is the only place that can actually surface
+    // the failure.
+    _connectionStateSubscription = _controller.states.listen((state) {
+      if (!_sessionActive ||
+          (state != RealtimeConnectionState.failed &&
+              state != RealtimeConnectionState.idle)) {
+        return;
+      }
+      unawaited(_handleConnectionLost());
+    });
+  }
+
+  /// Mirrors the stop branch of [_toggleSession] (persist transcript +
+  /// event log, trigger post-processing) so a connection that dies on its
+  /// own (ICE failure, backgrounding, network hiccup) is recorded exactly
+  /// like a manual stop — otherwise the session row is left with
+  /// `ended_at: null` forever and its event log, the main tool for
+  /// diagnosing this exact kind of failure, is never persisted.
+  Future<void> _handleConnectionLost() async {
+    final transcript = _controller.transcript;
+    final eventLog = _controller.eventLog;
+    await _controller.endSession();
+    final sessionId = _dialogSessionId;
+    _dialogSessionId = null;
+    if (sessionId != null) {
+      try {
+        await _sessionRepository.endSession(
+          sessionId,
+          fullTranscript: transcript,
+        );
+        unawaited(_triggerProcessing(sessionId));
+        unawaited(_logEvents(sessionId, eventLog));
+      } catch (error) {
+        debugPrint(
+          'Persistieren nach Verbindungsverlust fehlgeschlagen für '
+          'Session $sessionId: $error',
+        );
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _sessionActive = false;
+      _sessionChanging = false;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Verbindung unterbrochen. Bitte Session neu starten.'),
+      ),
+    );
   }
 
   Future<void> _toggleSession() async {
@@ -237,6 +294,7 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
     unawaited(_thinkingSubscription?.cancel());
     unawaited(_activeContextSubscription?.cancel());
     unawaited(_processingActivitySubscription?.cancel());
+    unawaited(_connectionStateSubscription?.cancel());
     unawaited(_controller.dispose());
     super.dispose();
   }

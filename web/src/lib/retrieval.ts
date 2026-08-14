@@ -41,7 +41,15 @@ const RERANK_MODEL = "gpt-4.1-mini"; // same model already used for Suche's Answ
 // the roadmap's later "Retrieval-Evaluation" step (30-50 real queries,
 // Precision@5/Recall@5/no-result accuracy). Revisit both once that exists.
 const DEFAULT_MIN_RELEVANCE = 0.35;
-const CONSERVATIVE_VECTOR_THRESHOLD = 0.75;
+// Lowered from an initial 0.75 after live production evidence: a genuinely
+// correct, stored fact ("Martin Amon lebt in Wiener Neustadt...") failed
+// this floor against the paraphrased query "Wohnort des Nutzers" (zero
+// lexical overlap for `simple`-config FTS, and text-embedding-3-small's
+// cosine similarity for true-but-differently-worded matches routinely lands
+// well under 0.75 — 0.75 is close to near-duplicate wording, not "related").
+// 0.45 still blocks unrelated candidates (typically <0.2 similarity) while
+// no longer vetoing real matches.
+const CONSERVATIVE_VECTOR_THRESHOLD = 0.45;
 const DEFAULT_MEMORY_CANDIDATE_COUNT = 30;
 const DEFAULT_CONTEXT_CANDIDATE_COUNT = 10;
 export const DEFAULT_RETRIEVAL_TOKEN_BUDGET = 2500;
@@ -370,13 +378,18 @@ export async function hybridRetrieve(params: {
 
   const eligible = candidates
     .map((candidate, i) => ({ candidate, source: scored[i] }))
-    .filter(
-      ({ candidate, source }) =>
-        passesConservativeGate(candidate) &&
-        // Only the LLM relevance_score is meaningful against minScore's
-        // 0-1 scale — without a successful rerank there's nothing to
-        // threshold beyond the conservative gate itself.
-        (relevanceById === null || source.relevance_score >= minScore),
+    .filter(({ candidate, source }) =>
+      // When reranking succeeded, the LLM has read the actual candidate
+      // content against the actual query — that is itself grounding, not a
+      // guess, so it is trusted on its own against minScore. Double-gating
+      // it behind the raw lexical/vector floor as well (as this used to do)
+      // caused real, live false negatives: correct rerank-confirmed matches
+      // were still discarded for lacking literal keyword overlap or a high
+      // enough cosine score. The conservative gate now only guards the
+      // no-reranker fallback path, where nothing else has verified grounding.
+      relevanceById !== null
+        ? source.relevance_score >= minScore
+        : passesConservativeGate(candidate),
     )
     .sort((a, b) => b.source.relevance_score - a.source.relevance_score)
     .map(({ source }) => source);
