@@ -7,6 +7,7 @@ const actions = [
   { href: "/capture", title: "Gedanken erfassen", text: "Notiz oder Dokument in deinen Wissensraum legen.", mark: "+", color: "from-violet-600 to-fuchsia-500" },
   { href: "/search", title: "Wissen befragen", text: "Antworten aus deinen gespeicherten Erinnerungen erhalten.", mark: "⌕", color: "from-cyan-500 to-blue-600" },
   { href: "/inbox", title: "Inbox ordnen", text: "Neue Inhalte prüfen und dem richtigen Kontext zuweisen.", mark: "↓", color: "from-amber-400 to-orange-500" },
+  { href: "/usage", title: "API-Verbrauch", text: "Realtime-Tokens und geschätzte Voice-Kosten verfolgen.", mark: "€", color: "from-emerald-500 to-teal-600" },
 ] as const;
 
 export default async function Home() {
@@ -33,7 +34,7 @@ export default async function Home() {
           </div>
         </section>
 
-        <section className="grid gap-4 md:grid-cols-3">
+        <section className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
           {actions.map((action) => (
             <Link key={action.href} href={action.href} className="glass-card group rounded-3xl p-6 transition duration-300 hover:-translate-y-1 hover:shadow-[0_24px_70px_rgba(29,39,68,.13)]">
               <span className={`grid size-11 place-items-center rounded-2xl bg-gradient-to-br ${action.color} text-xl text-white shadow-lg`}>{action.mark}</span>

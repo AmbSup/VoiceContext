@@ -6,6 +6,7 @@ const LINKS = [
   { href: "/capture", label: "Erfassen", icon: "+" },
   { href: "/inbox", label: "Inbox", icon: "↓" },
   { href: "/search", label: "Suche", icon: "⌕" },
+  { href: "/usage", label: "Verbrauch", icon: "€" },
 ] as const;
 
 export function AppNav({ current }: { current: (typeof LINKS)[number]["href"] }) {

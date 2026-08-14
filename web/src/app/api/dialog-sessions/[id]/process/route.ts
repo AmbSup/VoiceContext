@@ -1,6 +1,10 @@
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { runSegmentationPipeline } from "@/lib/pipeline";
 import { corsJson, corsPreflight } from "@/lib/cors";
+import {
+  createSessionMemoryNote,
+  sessionMemoryTokenCount,
+} from "@/lib/short-term-memory";
 
 // Triggers the shared Segmentation/Extraction/Classification pipeline (see
 // src/lib/pipeline.ts) for a finished Dialog-Session (see
@@ -60,7 +64,9 @@ export async function POST(
 
   const { data: session } = await supabase
     .from("dialog_sessions")
-    .select("id, context_space_id, ended_at, full_transcript, processing_status")
+    .select(
+      "id, context_space_id, started_context_id, ended_at, full_transcript, processing_status",
+    )
     .eq("id", dialogSessionId)
     .single();
 
@@ -94,15 +100,49 @@ export async function POST(
     .eq("id", dialogSessionId);
 
   try {
-    const result = await runSegmentationPipeline({
-      supabase,
-      contextSpaceId: session.context_space_id as string,
-      createdBy: user.id,
-      safetyIdentifier: user.id,
-      sourceType: "voice",
-      dialogSessionId,
-      transcript: session.full_transcript ?? "",
-    });
+    const transcript = session.full_transcript ?? "";
+    const [pipelineOutcome, noteOutcome] = await Promise.allSettled([
+      runSegmentationPipeline({
+        supabase,
+        contextSpaceId: session.context_space_id as string,
+        createdBy: user.id,
+        safetyIdentifier: user.id,
+        sourceType: "voice",
+        dialogSessionId,
+        transcript,
+        targetContextId:
+          (session.started_context_id as string | null) ?? undefined,
+      }),
+      createSessionMemoryNote(transcript, user.id),
+    ]);
+
+    if (noteOutcome.status === "fulfilled" && noteOutcome.value) {
+      const note = noteOutcome.value;
+      const { error: noteError } = await supabase
+        .from("dialog_sessions")
+        .update({
+          short_term_memory: note,
+          short_term_memory_token_count: sessionMemoryTokenCount(note),
+          short_term_memory_generated_at: new Date().toISOString(),
+        })
+        .eq("id", dialogSessionId);
+      if (noteError) {
+        console.error(
+          `Failed to store short-term memory for session ${dialogSessionId}:`,
+          noteError.message,
+        );
+      }
+    } else if (noteOutcome.status === "rejected") {
+      // The next session can still use the persisted raw final turns. A note
+      // failure must not discard otherwise successful long-term extraction.
+      console.error(
+        `Failed to create short-term memory for session ${dialogSessionId}:`,
+        noteOutcome.reason,
+      );
+    }
+
+    if (pipelineOutcome.status === "rejected") throw pipelineOutcome.reason;
+    const result = pipelineOutcome.value;
 
     await supabase
       .from("dialog_sessions")

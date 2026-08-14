@@ -16,12 +16,19 @@ export function CaptureResultMessage({
     );
   }
   if (state?.success) {
-    const { segmentsCreated, memoryItemsCreated, contextLinksCreated, flaggedForReviewCount } =
-      state.success;
+    const {
+      documentChunksCreated,
+      segmentsCreated,
+      memoryItemsCreated,
+      contextLinksCreated,
+      flaggedForReviewCount,
+    } = state.success;
     return (
       <p className="text-sm text-green-700 dark:text-green-400">
-        {segmentsCreated} Segment(e), {memoryItemsCreated} Memory-Item(s)
-        erstellt
+        {documentChunksCreated
+          ? `${documentChunksCreated} wortgetreue Dokument-Abschnitte, `
+          : ""}
+        {segmentsCreated} Segment(e), {memoryItemsCreated} Memory-Item(s) erstellt
         {contextLinksCreated > 0
           ? `, ${contextLinksCreated} automatisch zugeordnet`
           : memoryItemsCreated > 0

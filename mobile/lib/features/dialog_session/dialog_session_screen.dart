@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../../core/api/active_context_client.dart';
 import '../../core/api/dialog_processing_client.dart';
@@ -111,6 +112,7 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
   /// `ended_at: null` forever and its event log, the main tool for
   /// diagnosing this exact kind of failure, is never persisted.
   Future<void> _handleConnectionLost() async {
+    unawaited(WakelockPlus.disable());
     final transcript = _controller.transcript;
     final eventLog = _controller.eventLog;
     await _controller.endSession();
@@ -147,6 +149,7 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
     setState(() => _sessionChanging = true);
     try {
       if (_sessionActive) {
+        unawaited(WakelockPlus.disable());
         final transcript = _controller.transcript;
         final eventLog = _controller.eventLog;
         await _controller.endSession();
@@ -167,6 +170,11 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
         _processingActivity = '';
         _audioLevels.setAll(0, List<double>.filled(_waveformBarCount, 0));
         await _controller.startSession();
+        // Keeps the screen on for the whole live session — without this,
+        // Android's screen timeout dims/locks the screen mid-session,
+        // which (per user report) can visibly interrupt or drop the
+        // WebRTC connection well before the user is done talking.
+        unawaited(WakelockPlus.enable());
         try {
           _dialogSessionId = await _sessionRepository.startSession(
             startedContextId: _controller.activeContext?.id,
@@ -295,6 +303,7 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
     unawaited(_activeContextSubscription?.cancel());
     unawaited(_processingActivitySubscription?.cancel());
     unawaited(_connectionStateSubscription?.cancel());
+    unawaited(WakelockPlus.disable());
     unawaited(_controller.dispose());
     super.dispose();
   }

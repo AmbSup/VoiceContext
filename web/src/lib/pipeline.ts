@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createChatCompletion, createEmbeddings } from "./openai";
+import { truncateToTokens } from "./token-count";
 
 // Segmentation Engine + Memory Extraction + Context Classification, shared
 // by every input path (voice, document, manual text — see CONTEXT.md
@@ -376,6 +377,7 @@ export interface RunSegmentationPipelineParams {
 }
 
 export interface RunSegmentationPipelineResult {
+  documentChunksCreated?: number;
   segmentsCreated: number;
   memoryItemsCreated: number;
   contextLinksCreated: number;
@@ -458,6 +460,7 @@ export async function runSegmentationPipeline({
         source_type: sourceType,
         dialog_session_id: dialogSessionId ?? null,
         document_id: documentId ?? null,
+        context_id: targetContextId ?? null,
         content: segment.content,
       })
       .select("id")
@@ -544,7 +547,7 @@ export async function runSegmentationPipeline({
         safetyIdentifier,
       );
       itemEmbeddings = embeddings;
-      await Promise.all(
+      const updateResults = await Promise.all(
         insertedMemoryItems.map((item, index) =>
           supabase
             .from("memory_items")
@@ -552,6 +555,10 @@ export async function runSegmentationPipeline({
             .eq("id", item.id),
         ),
       );
+      const updateError = updateResults.find((result) => result.error)?.error;
+      if (updateError) {
+        throw new Error(`Failed to store memory-item embedding: ${updateError.message}`);
+      }
     } catch (error) {
       console.error(
         `Failed to generate/store embeddings for context space ${contextSpaceId}:`,
@@ -568,17 +575,26 @@ export async function runSegmentationPipeline({
   if (insertedSegments.length > 0) {
     try {
       const segmentEmbeddings = await createEmbeddings(
-        insertedSegments.map((s) => s.content),
+        insertedSegments.map((s) => truncateToTokens(s.content, 7_000)),
         safetyIdentifier,
       );
-      await Promise.all(
+      if (segmentEmbeddings.length !== insertedSegments.length) {
+        throw new Error(
+          `Segment embedding count mismatch: expected ${insertedSegments.length}, got ${segmentEmbeddings.length}`,
+        );
+      }
+      const updateResults = await Promise.all(
         insertedSegments.map((s, index) =>
           supabase
             .from("segments")
             .update({ embedding: segmentEmbeddings[index] })
             .eq("id", s.id),
-        ),
+          ),
       );
+      const updateError = updateResults.find((result) => result.error)?.error;
+      if (updateError) {
+        throw new Error(`Failed to store segment embedding: ${updateError.message}`);
+      }
     } catch (error) {
       console.error(
         `Failed to generate/store segment embeddings for context space ${contextSpaceId}:`,

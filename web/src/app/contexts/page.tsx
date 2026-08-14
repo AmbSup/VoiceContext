@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
+import { countTokens } from "@/lib/token-count";
 import { AppNav } from "@/components/app-nav";
 import { NewContextForm } from "./new-context-form";
 import { setActiveContext } from "./actions";
@@ -12,6 +13,11 @@ interface ContextRow {
   description: string | null;
   created_at: string;
   memory_context_links: { count: number }[];
+}
+
+interface ContextMemoryLinkRow {
+  context_id: string;
+  memory_items: { content: string; status: string } | null;
 }
 
 export default async function ContextsPage() {
@@ -26,17 +32,49 @@ export default async function ContextsPage() {
 
   const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
 
-  const { data: contexts } = await supabase
-    .from("contexts")
-    .select("id, name, description, created_at, memory_context_links(count)")
-    .eq("context_space_id", contextSpaceId)
-    .order("created_at", { ascending: true });
-  const { data: activePreference } = await supabase
-    .from("active_context_preferences")
-    .select("default_context_id")
-    .eq("context_space_id", contextSpaceId)
-    .eq("user_id", user.id)
-    .maybeSingle();
+  const [{ data: contexts }, { data: activePreference }] = await Promise.all([
+    supabase
+      .from("contexts")
+      .select("id, name, description, created_at, memory_context_links(count)")
+      .eq("context_space_id", contextSpaceId)
+      .order("created_at", { ascending: true }),
+    supabase
+      .from("active_context_preferences")
+      .select("default_context_id")
+      .eq("context_space_id", contextSpaceId)
+      .eq("user_id", user.id)
+      .maybeSingle(),
+  ]);
+  const contextRows = (contexts ?? []) as ContextRow[];
+  const contextIds = contextRows.map(({ id }) => id);
+  const { data: memoryLinks, error: memoryLinksError } = contextIds.length
+    ? await supabase
+        .from("memory_context_links")
+        .select("context_id, memory_items!inner(content, status)")
+        .in("context_id", contextIds)
+        .eq("memory_items.status", "aktiv")
+    : { data: [], error: null };
+  if (memoryLinksError) throw new Error(memoryLinksError.message);
+
+  const activeContentsByContext = new Map<string, string[]>();
+  for (const link of (memoryLinks ?? []) as unknown as ContextMemoryLinkRow[]) {
+    if (!link.memory_items) continue;
+    const contents = activeContentsByContext.get(link.context_id) ?? [];
+    contents.push(link.memory_items.content);
+    activeContentsByContext.set(link.context_id, contents);
+  }
+  const tokenCountByContext = new Map(
+    contextRows.map((context) => [
+      context.id,
+      countTokens(
+        JSON.stringify({
+          name: context.name,
+          description: context.description,
+          items: activeContentsByContext.get(context.id) ?? [],
+        }),
+      ),
+    ]),
+  );
   const activeContextId = activePreference?.default_context_id as
     | string
     | undefined;
@@ -63,7 +101,7 @@ export default async function ContextsPage() {
                 Noch keine Kontexte angelegt.
               </li>
             )}
-            {((contexts ?? []) as ContextRow[]).map((context) => {
+            {contextRows.map((context) => {
               const itemCount = context.memory_context_links[0]?.count ?? 0;
               const isActive = context.id === activeContextId;
               return (
@@ -101,6 +139,12 @@ export default async function ContextsPage() {
                   )}
                   <span className="shrink-0 rounded-full bg-violet-500/10 px-3 py-1.5 text-sm font-semibold text-violet-700 dark:text-violet-300">
                     {itemCount.toLocaleString("de-DE")} {itemCount === 1 ? "Item" : "Items"}
+                  </span>
+                  <span
+                    title="Kontextname, Beschreibung und aktive Memory-Items"
+                    className="shrink-0 rounded-full bg-cyan-500/10 px-3 py-1.5 text-sm font-semibold text-cyan-700 dark:text-cyan-300"
+                  >
+                    {(tokenCountByContext.get(context.id) ?? 0).toLocaleString("de-DE")} Tokens
                   </span>
                 </li>
               );

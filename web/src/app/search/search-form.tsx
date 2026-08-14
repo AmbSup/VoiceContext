@@ -99,6 +99,23 @@ export function SearchForm() {
                         </p>
                       )}
                     </li>
+                  ) : source.kind === "document_chunk" ? (
+                    <li
+                      key={`document-chunk-${source.id}`}
+                      className="rounded-lg border border-black/[.08] bg-white p-3 dark:border-white/[.145] dark:bg-zinc-950"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+                          Dokument-Detail
+                        </span>
+                        <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                          {source.file_name} · Abschnitt {source.chunk_index + 1}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-sm text-black dark:text-zinc-50">
+                        {source.content}
+                      </p>
+                    </li>
                   ) : source.kind === "segment" ? (
                     <li
                       key={`segment-${source.id}`}

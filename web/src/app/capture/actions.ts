@@ -16,6 +16,7 @@ import {
   formatFileSize,
   splitDocumentText,
 } from "@/lib/document-text";
+import { storeDocumentChunks } from "@/lib/document-chunks";
 
 export interface CaptureState {
   error?: string;
@@ -199,6 +200,7 @@ export async function uploadDocument(
       uploaded_by: user.id,
       file_name: file.name,
       file_url: storagePath,
+      context_id: targetContext.id ?? null,
     })
     .select("id")
     .single();
@@ -210,6 +212,7 @@ export async function uploadDocument(
   }
 
   const result: RunSegmentationPipelineResult = {
+    documentChunksCreated: 0,
     segmentsCreated: 0,
     memoryItemsCreated: 0,
     contextLinksCreated: 0,
@@ -217,6 +220,15 @@ export async function uploadDocument(
     flaggedForReviewCount: 0,
   };
   try {
+    result.documentChunksCreated = await storeDocumentChunks({
+      supabase,
+      contextSpaceId,
+      contextId: targetContext.id,
+      documentId: documentRow.id,
+      text,
+      safetyIdentifier: user.id,
+    });
+
     for (const chunk of splitDocumentText(text)) {
       const chunkResult = await runSegmentationPipeline({
         supabase,

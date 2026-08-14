@@ -15,6 +15,7 @@ dependencies:
   supabase_flutter: ^2.5.0
   flutter_webrtc: ^1.6.0
   http: ^1.2.0
+  wakelock_plus: ^1.2.8
 
 dev_dependencies:
   flutter_test:
