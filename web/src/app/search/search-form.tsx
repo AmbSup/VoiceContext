@@ -45,6 +45,31 @@ export function SearchForm() {
             </p>
           </div>
 
+          <div
+            className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500 dark:text-zinc-400"
+            aria-label="Verwendetes Retrieval-Token-Budget"
+          >
+            <span className="font-medium text-zinc-700 dark:text-zinc-300">
+              Retrieval-Kontext:
+            </span>
+            <span>
+              {state.result.retrievalUsage.usedTokens.toLocaleString("de-DE")} /{" "}
+              {state.result.retrievalUsage.maxTokens.toLocaleString("de-DE")} Tokens
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>
+              {state.result.retrievalUsage.selectedCount}{" "}
+              {state.result.retrievalUsage.selectedCount === 1
+                ? "Quelle"
+                : "Quellen"}
+            </span>
+            {state.result.retrievalUsage.truncated && (
+              <span className="rounded-full bg-amber-100 px-2 py-0.5 font-medium text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
+                Budget erreicht
+              </span>
+            )}
+          </div>
+
           {state.result.sources.length > 0 && (
             <div>
               <h2 className="mb-2 text-sm font-medium text-zinc-500 dark:text-zinc-400">

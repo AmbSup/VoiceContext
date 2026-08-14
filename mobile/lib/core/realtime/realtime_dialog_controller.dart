@@ -721,6 +721,7 @@ class RealtimeDialogController {
     Object? ambiguousContext;
     Object? contextNotFound;
     Object? retrievalScope;
+    Object? retrievalUsage;
     String? contextError;
     String webAnswer = '';
     String? webError;
@@ -741,6 +742,7 @@ class RealtimeDialogController {
           ambiguousContext = result['ambiguous_context'];
           contextNotFound = result['context_not_found'];
           retrievalScope = result['retrieval_scope'];
+          retrievalUsage = result['retrieval_usage'];
         } catch (error) {
           contextError = 'context_retrieval_failed: $error';
         }
@@ -760,6 +762,7 @@ class RealtimeDialogController {
         if (ambiguousContext != null) 'ambiguous_context': ambiguousContext,
         if (contextNotFound != null) 'context_not_found': contextNotFound,
         if (retrievalScope != null) 'retrieval_scope': retrievalScope,
+        if (retrievalUsage != null) 'retrieval_usage': retrievalUsage,
         if (contextError != null) 'error': contextError,
       },
       'internet': {

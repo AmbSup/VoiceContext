@@ -1,4 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { Tiktoken } from "js-tiktoken/lite";
+import o200kBase from "js-tiktoken/ranks/o200k_base";
 import { createChatCompletion, createEmbeddings } from "@/lib/openai";
 
 // Hybrid Retrieval — shared by web/src/app/search/actions.ts (web Suche) and
@@ -13,7 +15,9 @@ import { createChatCompletion, createEmbeddings } from "@/lib/openai";
 // Pipeline: query -> best-effort embedding -> hybrid RPCs (FTS + vector,
 // metadata filters applied inside the RPC before ranking) -> RRF-fused
 // candidate pool -> optional LLM reranking -> conservative relevance gate
-// (always, regardless of reranking) -> per-kind top-N.
+// (always, regardless of reranking) -> one shared token budget across both
+// source kinds. The RPC limits only bound work; they no longer decide how
+// many sources reach the answer.
 //
 // Reranking is NOT mandatory: it's a real network round trip on top of the
 // embedding call and two DB queries, and the live voice path
@@ -38,9 +42,11 @@ const RERANK_MODEL = "gpt-4.1-mini"; // same model already used for Suche's Answ
 // Precision@5/Recall@5/no-result accuracy). Revisit both once that exists.
 const DEFAULT_MIN_RELEVANCE = 0.35;
 const CONSERVATIVE_VECTOR_THRESHOLD = 0.75;
-const DEFAULT_MATCH_COUNT = 8;
-const DEFAULT_CONTEXT_MATCH_COUNT = 3;
+const DEFAULT_MEMORY_CANDIDATE_COUNT = 30;
+const DEFAULT_CONTEXT_CANDIDATE_COUNT = 10;
+export const DEFAULT_RETRIEVAL_TOKEN_BUDGET = 2500;
 const MAX_QUERY_LENGTH = 500;
+const retrievalEncoding = new Tiktoken(o200kBase);
 
 export type RerankMode = { mode: "off" } | { mode: "llm"; timeoutMs?: number };
 
@@ -75,6 +81,31 @@ export interface RetrievedContext {
 }
 
 export type RetrievedSource = RetrievedMemoryItem | RetrievedContext;
+
+export interface RetrievalUsage {
+  usedTokens: number;
+  maxTokens: number;
+  candidateCount: number;
+  selectedCount: number;
+  truncated: boolean;
+}
+
+export interface RetrievalResult {
+  sources: RetrievedSource[];
+  usage: RetrievalUsage;
+}
+
+export function emptyRetrievalUsage(
+  maxTokens = DEFAULT_RETRIEVAL_TOKEN_BUDGET,
+): RetrievalUsage {
+  return {
+    usedTokens: 0,
+    maxTokens,
+    candidateCount: 0,
+    selectedCount: 0,
+    truncated: false,
+  };
+}
 
 interface MemoryItemCandidateRow {
   id: string;
@@ -195,23 +226,72 @@ function passesConservativeGate(c: Candidate): boolean {
   return c.fts_rank > 0 || c.similarity >= CONSERVATIVE_VECTOR_THRESHOLD;
 }
 
+function sourceTokenCount(source: RetrievedSource): number {
+  // Budget only the semantic source payload injected into answer prompts.
+  // Transport IDs and ranking diagnostics do not consume context tokens.
+  const promptSource =
+    source.kind === "memory_item"
+      ? {
+          type: source.type,
+          content: source.content,
+          status: source.status,
+          confidence: source.confidence,
+          occurred_at: source.occurred_at,
+        }
+      : {
+          type: "kontext_beschreibung",
+          name: source.name,
+          description: source.description,
+        };
+  return retrievalEncoding.encode(JSON.stringify(promptSource)).length;
+}
+
+function applyTokenBudget(
+  sources: RetrievedSource[],
+  maxTokens: number,
+  candidateCount: number,
+): RetrievalResult {
+  const selected: RetrievedSource[] = [];
+  let usedTokens = 0;
+
+  for (const source of sources) {
+    const sourceTokens = sourceTokenCount(source);
+    if (usedTokens + sourceTokens > maxTokens) continue;
+    selected.push(source);
+    usedTokens += sourceTokens;
+  }
+
+  return {
+    sources: selected,
+    usage: {
+      usedTokens,
+      maxTokens,
+      candidateCount,
+      selectedCount: selected.length,
+      truncated: selected.length < sources.length,
+    },
+  };
+}
+
 export async function hybridRetrieve(params: {
   supabase: SupabaseClient;
   query: string;
   contextSpaceId: string;
   userId: string;
-  matchCount?: number;
-  contextMatchCount?: number;
+  memoryCandidateCount?: number;
+  contextCandidateCount?: number;
+  tokenBudget?: number;
   minScore?: number;
   filters?: RetrievalFilters;
   rerank?: RerankMode;
-}): Promise<RetrievedSource[]> {
+}): Promise<RetrievalResult> {
   const {
     supabase,
     contextSpaceId,
     userId,
-    matchCount = DEFAULT_MATCH_COUNT,
-    contextMatchCount = DEFAULT_CONTEXT_MATCH_COUNT,
+    memoryCandidateCount = DEFAULT_MEMORY_CANDIDATE_COUNT,
+    contextCandidateCount = DEFAULT_CONTEXT_CANDIDATE_COUNT,
+    tokenBudget = DEFAULT_RETRIEVAL_TOKEN_BUDGET,
     minScore = DEFAULT_MIN_RELEVANCE,
     filters,
     rerank = { mode: "llm" },
@@ -233,7 +313,7 @@ export async function hybridRetrieve(params: {
       query_embedding: queryEmbedding,
       query_text: query,
       match_context_space_id: contextSpaceId,
-      match_count: matchCount,
+      match_count: memoryCandidateCount,
       match_types: filters?.types ?? null,
       match_context_id: filters?.contextId ?? null,
       match_occurred_from: filters?.occurredFrom ?? null,
@@ -243,7 +323,7 @@ export async function hybridRetrieve(params: {
       query_embedding: queryEmbedding,
       query_text: query,
       match_context_space_id: contextSpaceId,
-      match_count: contextMatchCount,
+      match_count: contextCandidateCount,
       match_context_id: filters?.contextId ?? null,
     }),
   ]);
@@ -260,7 +340,9 @@ export async function hybridRetrieve(params: {
     ...contextRows.map((row) => ({ ...row, kind: "context" as const })),
   ];
 
-  if (candidates.length === 0) return [];
+  if (candidates.length === 0) {
+    return { sources: [], usage: emptyRetrievalUsage(tokenBudget) };
+  }
 
   let relevanceById: Map<string, number> | null = null;
   if (rerank.mode === "llm") {
@@ -286,27 +368,18 @@ export async function hybridRetrieve(params: {
       : { ...c, kind: "context", relevance_score };
   });
 
-  const topByKind = <T extends RetrievedSource>(
-    kind: T["kind"],
-    count: number,
-  ): T[] =>
-    candidates
-      .map((c, i) => ({ candidate: c, source: scored[i] }))
-      .filter(
-        ({ candidate, source }) =>
-          source.kind === kind &&
-          passesConservativeGate(candidate) &&
-          // Only the LLM relevance_score is meaningful against minScore's
-          // 0-1 scale — without a successful rerank there's nothing to
-          // threshold beyond the conservative gate itself.
-          (relevanceById === null || source.relevance_score >= minScore),
-      )
-      .sort((a, b) => b.source.relevance_score - a.source.relevance_score)
-      .slice(0, count)
-      .map(({ source }) => source as T);
+  const eligible = candidates
+    .map((candidate, i) => ({ candidate, source: scored[i] }))
+    .filter(
+      ({ candidate, source }) =>
+        passesConservativeGate(candidate) &&
+        // Only the LLM relevance_score is meaningful against minScore's
+        // 0-1 scale — without a successful rerank there's nothing to
+        // threshold beyond the conservative gate itself.
+        (relevanceById === null || source.relevance_score >= minScore),
+    )
+    .sort((a, b) => b.source.relevance_score - a.source.relevance_score)
+    .map(({ source }) => source);
 
-  return [
-    ...topByKind<RetrievedMemoryItem>("memory_item", matchCount),
-    ...topByKind<RetrievedContext>("context", contextMatchCount),
-  ];
+  return applyTokenBudget(eligible, tokenBudget, candidates.length);
 }

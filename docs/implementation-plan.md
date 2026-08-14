@@ -27,7 +27,7 @@ Grundlage: [CONTEXT.md](../CONTEXT.md), [ADR 0001](adr/0001-live-dialog-mvp.md),
 ## Phase 3 — Retrieval & Answer
 
 - Embeddings (OpenAI, EU-Endpoint) für jedes Memory-Item.
-- Retrieval: Vektorsuche + strukturierte Filter (Kontext, Typ, Status, Datum) — kein Graph, kein Source Router als eigene Komponente (Modus A ist Standard, siehe ADR 0002).
+- Retrieval: Hybrid-Suche (Vektor + Volltext) + strukturierte Filter (Kontext, Typ, Status, Datum), Reranking und gemeinsames 2.500-Token-Budget für Memory-Items und Kontexte — kein Graph, kein Source Router als eigene Komponente (Modus A ist Standard, siehe ADR 0002).
 - Live-Pfad: während der Dialog-Session löst eine erkannte echte Frage einen gezielten Retrieval-Call aus (Function-Call in der Realtime-Session), nicht den vollen Batch-Pfad.
 - **Aktiver Kontext**: Default = zuletzt aktiver Kontext; bei erkanntem Themenwechsel mit hoher Konfidenz temporärer Fokuswechsel nur für den jeweiligen Antwortzyklus, dauerhafter Wechsel erst nach Bestätigung über mehrere Zyklen.
 

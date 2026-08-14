@@ -3,7 +3,12 @@
 import { createClient } from "@/lib/supabase/server";
 import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
 import { createChatCompletion } from "@/lib/openai";
-import { hybridRetrieve, type RetrievedContext, type RetrievedMemoryItem } from "@/lib/retrieval";
+import {
+  hybridRetrieve,
+  type RetrievalUsage,
+  type RetrievedContext,
+  type RetrievedMemoryItem,
+} from "@/lib/retrieval";
 
 // Retrieval + Answer Engine (see docs/implementation-plan.md Phase 3).
 // Modus A only ("nur persönlicher Kontext", see ADR 0002) — no internet,
@@ -20,9 +25,6 @@ import { hybridRetrieve, type RetrievedContext, type RetrievedMemoryItem } from 
 // user hitting exactly that wall.
 
 const ANSWER_MODEL = "gpt-4.1-mini";
-const MATCH_COUNT = 8;
-const CONTEXT_MATCH_COUNT = 3;
-
 export interface MemoryItemSource extends RetrievedMemoryItem {
   contexts: { id: string; name: string }[];
 }
@@ -37,6 +39,7 @@ export interface SearchState {
     query: string;
     answer: string;
     sources: SearchSource[];
+    retrievalUsage: RetrievalUsage;
   };
 }
 
@@ -88,21 +91,21 @@ export async function search(
   const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
 
   try {
-    const retrieved = await hybridRetrieve({
+    const retrieval = await hybridRetrieve({
       supabase,
       query,
       contextSpaceId,
       userId: user.id,
-      matchCount: MATCH_COUNT,
-      contextMatchCount: CONTEXT_MATCH_COUNT,
       // No hard latency budget here (unlike the live voice path), so a
       // plain, untimed LLM rerank pass is fine.
       rerank: { mode: "llm" },
     });
-    const memoryItemRows = retrieved.filter(
+    const memoryItemRows = retrieval.sources.filter(
       (s): s is RetrievedMemoryItem => s.kind === "memory_item",
     );
-    const contextRows = retrieved.filter((s): s is ContextSource => s.kind === "context");
+    const contextRows = retrieval.sources.filter(
+      (s): s is ContextSource => s.kind === "context",
+    );
 
     if (memoryItemRows.length === 0 && contextRows.length === 0) {
       return {
@@ -111,6 +114,7 @@ export async function search(
           answer:
             "Dazu habe ich noch nichts in deinem Wissen gefunden. Entweder wurde es noch nicht erfasst, oder es liegt noch nicht lange genug zurück, um verarbeitet zu sein.",
           sources: [],
+          retrievalUsage: retrieval.usage,
         },
       };
     }
@@ -147,7 +151,9 @@ export async function search(
       ],
     });
 
-    return { result: { query, answer, sources } };
+    return {
+      result: { query, answer, sources, retrievalUsage: retrieval.usage },
+    };
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) };
   }
