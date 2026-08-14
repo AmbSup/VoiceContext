@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useRef } from "react";
+import { useActionState, useEffect, useRef, useState } from "react";
 import { uploadDocument } from "./actions";
 import { CaptureResultMessage } from "./capture-result-message";
 
@@ -10,6 +10,7 @@ export function DocumentUploadForm() {
     undefined,
   );
   const formRef = useRef<HTMLFormElement>(null);
+  const [fileInfo, setFileInfo] = useState<string>();
 
   useEffect(() => {
     if (state?.success) {
@@ -27,15 +28,38 @@ export function DocumentUploadForm() {
         Dokument hochladen
       </h2>
       <p className="text-xs text-zinc-500 dark:text-zinc-500">
-        Unterstützt: .txt, .md (max. 300 KB).
+        Text/Markdown bis 1 MB · PDF/Word bis 4 MB. Große Dokumente werden
+        automatisch abschnittsweise verarbeitet.
       </p>
       <input
         type="file"
         name="file"
         required
-        accept=".txt,.md,.markdown,text/plain,text/markdown"
+        accept=".txt,.md,.markdown,.pdf,.doc,.docx,text/plain,text/markdown,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (!file) {
+            setFileInfo(undefined);
+            return;
+          }
+          const extension = file.name
+            .slice(file.name.lastIndexOf("."))
+            .toLowerCase();
+          const maxMb = [".txt", ".md", ".markdown"].includes(extension)
+            ? 1
+            : 4;
+          const actualMb = file.size / (1024 * 1024);
+          setFileInfo(
+            `${actualMb.toFixed(actualMb < 1 ? 2 : 1)} MB von maximal ${maxMb} MB`,
+          );
+        }}
         className="text-sm text-black dark:text-zinc-50"
       />
+      {fileInfo && !state?.success && (
+        <p className="text-xs font-medium text-violet-600 dark:text-violet-400">
+          {fileInfo}
+        </p>
+      )}
       <div className="flex flex-col gap-1">
         <label
           htmlFor="document-upload-target-context"
