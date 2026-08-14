@@ -46,6 +46,15 @@ export const MEMORY_ITEM_CONFIDENCE_LABELS: Record<string, string> = {
   hoch: "Hohe Konfidenz",
 };
 
+// memory_conflict_reviews.verdict — see supabase/migrations/
+// 0014_conflict_review.sql and web/src/lib/pipeline.ts's conflict
+// classifier.
+export const MEMORY_CONFLICT_VERDICT_LABELS: Record<string, string> = {
+  duplikat: "Duplikat",
+  widerspruch: "Widerspruch",
+  ersetzt_veraltet: "Ersetzt/veraltet",
+};
+
 export function formatMemoryItemType(type: string): string {
   return MEMORY_ITEM_TYPE_LABELS[type] ?? type;
 }
@@ -66,4 +75,8 @@ export function formatMemoryItemConfidence(
 ): string | null {
   if (!confidence) return null;
   return MEMORY_ITEM_CONFIDENCE_LABELS[confidence] ?? confidence;
+}
+
+export function formatConflictVerdict(verdict: string): string {
+  return MEMORY_CONFLICT_VERDICT_LABELS[verdict] ?? verdict;
 }

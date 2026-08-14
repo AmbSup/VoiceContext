@@ -8,10 +8,24 @@ import {
   runSegmentationPipeline,
   type RunSegmentationPipelineResult,
 } from "@/lib/pipeline";
+import {
+  DOCUMENT_FILE_LIMITS,
+  MAX_EXTRACTED_TEXT_CHARACTERS,
+  extensionOf,
+  extractDocumentText,
+  formatFileSize,
+  splitDocumentText,
+} from "@/lib/document-text";
 
 export interface CaptureState {
   error?: string;
   success?: RunSegmentationPipelineResult;
+  // Set alongside `error` when uploadDocument's chunk loop fails partway
+  // through — the earlier chunks' segments/memory items are already
+  // committed (each runSegmentationPipeline call is its own set of writes,
+  // there's no cross-chunk rollback), so the error alone would otherwise
+  // misleadingly imply nothing was saved.
+  partial?: RunSegmentationPipelineResult;
 }
 
 // Free-text "Ziel-Kontext" field on both capture forms: the user types a
@@ -101,8 +115,7 @@ export async function submitManualText(
 // exists yet (see docs/implementation-plan.md Phase 5). The Segmentation
 // Engine gets the raw text either way, so uploading a .txt export is
 // functionally equivalent to any richer format for now.
-const ALLOWED_EXTENSIONS = [".txt", ".md", ".markdown"];
-const MAX_FILE_SIZE_BYTES = 300 * 1024;
+const ALLOWED_EXTENSIONS = Object.keys(DOCUMENT_FILE_LIMITS);
 
 function sanitizeFileName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -123,21 +136,51 @@ export async function uploadDocument(
     return { error: "Bitte eine Datei auswählen" };
   }
 
-  const dotIndex = file.name.lastIndexOf(".");
-  const extension = dotIndex >= 0 ? file.name.slice(dotIndex).toLowerCase() : "";
+  const extension = extensionOf(file.name);
   if (!ALLOWED_EXTENSIONS.includes(extension)) {
     return {
       error: `Dateityp nicht unterstützt (erlaubt: ${ALLOWED_EXTENSIONS.join(", ")})`,
     };
   }
-  if (file.size > MAX_FILE_SIZE_BYTES) {
-    return { error: "Datei ist zu groß (max. 300 KB)" };
+  const fileSizeLimit = DOCUMENT_FILE_LIMITS[extension];
+  if (file.size > fileSizeLimit) {
+    return {
+      error: `Datei ist zu groß (max. ${formatFileSize(fileSizeLimit)} für ${extension})`,
+    };
   }
 
-  const text = (await file.text()).trim();
-  if (!text) return { error: "Datei ist leer" };
+  let text: string;
+  try {
+    text = await extractDocumentText(file, extension);
+  } catch (error) {
+    return {
+      error: `Text konnte nicht extrahiert werden: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  if (!text) {
+    return {
+      error:
+        extension === ".pdf"
+          ? "PDF enthält keinen auslesbaren Text. Eingescannte PDFs benötigen OCR."
+          : "Dokument enthält keinen auslesbaren Text",
+    };
+  }
+  if (text.length > MAX_EXTRACTED_TEXT_CHARACTERS) {
+    return {
+      error: `Dokument enthält zu viel Text (max. ${MAX_EXTRACTED_TEXT_CHARACTERS.toLocaleString("de-DE")} Zeichen nach Extraktion)`,
+    };
+  }
 
   const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
+
+  // Resolve/validate the requested target before creating a Storage object or
+  // documents row, so an invalid context cannot leave an orphaned upload.
+  const targetContext = await resolveTargetContextId(
+    supabase,
+    contextSpaceId,
+    formData.get("target_context"),
+  );
+  if (targetContext.error) return { error: targetContext.error };
 
   // Path convention `${context_space_id}/...` matches the storage RLS
   // policy in supabase/migrations/0009_documents_storage_bucket.sql.
@@ -161,27 +204,36 @@ export async function uploadDocument(
     .single();
   if (documentError || !documentRow) {
     await supabase.storage.from("documents").remove([storagePath]);
-    return { error: `Dokument-Eintrag fehlgeschlagen: ${documentError?.message}` };
+    return {
+      error: `Dokument-Eintrag fehlgeschlagen: ${documentError?.message}`,
+    };
   }
 
-  const targetContext = await resolveTargetContextId(
-    supabase,
-    contextSpaceId,
-    formData.get("target_context"),
-  );
-  if (targetContext.error) return { error: targetContext.error };
-
+  const result: RunSegmentationPipelineResult = {
+    segmentsCreated: 0,
+    memoryItemsCreated: 0,
+    contextLinksCreated: 0,
+    supersededCount: 0,
+    flaggedForReviewCount: 0,
+  };
   try {
-    const result = await runSegmentationPipeline({
-      supabase,
-      contextSpaceId,
-      createdBy: user.id,
-      safetyIdentifier: user.id,
-      sourceType: "document",
-      documentId: documentRow.id,
-      transcript: text,
-      targetContextId: targetContext.id,
-    });
+    for (const chunk of splitDocumentText(text)) {
+      const chunkResult = await runSegmentationPipeline({
+        supabase,
+        contextSpaceId,
+        createdBy: user.id,
+        safetyIdentifier: user.id,
+        sourceType: "document",
+        documentId: documentRow.id,
+        transcript: chunk,
+        targetContextId: targetContext.id,
+      });
+      result.segmentsCreated += chunkResult.segmentsCreated;
+      result.memoryItemsCreated += chunkResult.memoryItemsCreated;
+      result.contextLinksCreated += chunkResult.contextLinksCreated;
+      result.supersededCount += chunkResult.supersededCount;
+      result.flaggedForReviewCount += chunkResult.flaggedForReviewCount;
+    }
     revalidatePath("/inbox");
     revalidatePath("/contexts");
     // Covers every context detail page, not just the manually typed
@@ -191,6 +243,32 @@ export async function uploadDocument(
     revalidatePath("/contexts/[id]", "page");
     return { success: result };
   } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) };
+    const message = error instanceof Error ? error.message : String(error);
+    const { data: rollback, error: rollbackError } = await supabase
+      .rpc("rollback_document_import", { p_document_id: documentRow.id })
+      .single<{ storage_path: string }>();
+
+    if (rollbackError || !rollback) {
+      // Do not remove the object while its documents row still exists. The
+      // partial result is surfaced explicitly so an operator can retry the
+      // compensating cleanup without creating a silent broken reference.
+      revalidatePath("/inbox");
+      revalidatePath("/contexts");
+      revalidatePath("/contexts/[id]", "page");
+      return {
+        error: `${message} (Rollback fehlgeschlagen: ${rollbackError?.message ?? "unbekannter Fehler"})`,
+        partial: result.memoryItemsCreated > 0 ? result : undefined,
+      };
+    }
+
+    const { error: storageCleanupError } = await supabase.storage
+      .from("documents")
+      .remove([rollback.storage_path]);
+    if (storageCleanupError) {
+      return {
+        error: `${message} (Daten wurden zurückgerollt, Datei-Cleanup fehlgeschlagen: ${storageCleanupError.message})`,
+      };
+    }
+    return { error: `${message} (Import vollständig zurückgerollt)` };
   }
 }
