@@ -99,6 +99,20 @@ export function SearchForm() {
                         </p>
                       )}
                     </li>
+                  ) : source.kind === "segment" ? (
+                    <li
+                      key={`segment-${source.id}`}
+                      className="rounded-lg border border-black/[.08] bg-white p-3 dark:border-white/[.145] dark:bg-zinc-950"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-full bg-sky-100 px-2.5 py-0.5 text-xs font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
+                          Abschnitt
+                        </span>
+                      </div>
+                      <p className="mt-1 text-sm text-black dark:text-zinc-50">
+                        {source.content}
+                      </p>
+                    </li>
                   ) : (
                     <li
                       key={`memory-item-${source.id}`}

@@ -439,6 +439,7 @@ export async function runSegmentationPipeline({
   const validContextIds = new Set((contexts ?? []).map((c) => c.id as string));
 
   let segmentsCreated = 0;
+  const insertedSegments: { id: string; content: string }[] = [];
   const insertedMemoryItems: {
     id: string;
     type: MemoryItemType;
@@ -465,6 +466,7 @@ export async function runSegmentationPipeline({
       throw new Error(`Failed to insert segment: ${segmentError?.message}`);
     }
     segmentsCreated += 1;
+    insertedSegments.push({ id: segmentRow.id, content: segment.content });
 
     for (const item of segment.memory_items) {
       if (item.content.trim() === "") continue;
@@ -553,6 +555,33 @@ export async function runSegmentationPipeline({
     } catch (error) {
       console.error(
         `Failed to generate/store embeddings for context space ${contextSpaceId}:`,
+        error,
+      );
+    }
+  }
+
+  // Same best-effort batching as the memory-item embeddings above — powers
+  // segments' new Hybrid Retrieval source (match_segments, see
+  // 20260814150000_segment_embeddings.sql). A failure here must not roll
+  // back the segments/memory_items already inserted; those rows just stay
+  // unsearchable via match_segments until a later backfill.
+  if (insertedSegments.length > 0) {
+    try {
+      const segmentEmbeddings = await createEmbeddings(
+        insertedSegments.map((s) => s.content),
+        safetyIdentifier,
+      );
+      await Promise.all(
+        insertedSegments.map((s, index) =>
+          supabase
+            .from("segments")
+            .update({ embedding: segmentEmbeddings[index] })
+            .eq("id", s.id),
+        ),
+      );
+    } catch (error) {
+      console.error(
+        `Failed to generate/store segment embeddings for context space ${contextSpaceId}:`,
         error,
       );
     }

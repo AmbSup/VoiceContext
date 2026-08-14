@@ -8,6 +8,7 @@ import {
   type RetrievalUsage,
   type RetrievedContext,
   type RetrievedMemoryItem,
+  type RetrievedSegment,
 } from "@/lib/retrieval";
 
 // Retrieval + Answer Engine (see docs/implementation-plan.md Phase 3).
@@ -30,8 +31,9 @@ export interface MemoryItemSource extends RetrievedMemoryItem {
 }
 
 export type ContextSource = RetrievedContext;
+export type SegmentSource = RetrievedSegment;
 
-export type SearchSource = MemoryItemSource | ContextSource;
+export type SearchSource = MemoryItemSource | ContextSource | SegmentSource;
 
 export interface SearchState {
   error?: string;
@@ -54,19 +56,24 @@ Regeln:
 }
 
 function buildAnswerUserPrompt(query: string, sources: SearchSource[]): string {
-  const items = sources.map((s) =>
-    s.kind === "memory_item"
-      ? {
+  const items = sources.map((s) => {
+    switch (s.kind) {
+      case "memory_item":
+        return {
           type: s.type,
           content: s.content,
           status: s.status,
           occurred_at: s.occurred_at,
-        }
-      : {
+        };
+      case "segment":
+        return { type: "segment", content: s.content };
+      case "context":
+        return {
           type: "kontext_beschreibung",
           content: s.description ? `${s.name}: ${s.description}` : s.name,
-        },
-  );
+        };
+    }
+  });
   return `## Frage\n${query}\n\n## Gefundene Informationen\n${JSON.stringify(items)}`;
 }
 
@@ -106,8 +113,15 @@ export async function search(
     const contextRows = retrieval.sources.filter(
       (s): s is ContextSource => s.kind === "context",
     );
+    const segmentRows = retrieval.sources.filter(
+      (s): s is SegmentSource => s.kind === "segment",
+    );
 
-    if (memoryItemRows.length === 0 && contextRows.length === 0) {
+    if (
+      memoryItemRows.length === 0 &&
+      contextRows.length === 0 &&
+      segmentRows.length === 0
+    ) {
       return {
         result: {
           query,
@@ -140,6 +154,7 @@ export async function search(
         (row): MemoryItemSource => ({ ...row, contexts: contextsByItem.get(row.id) ?? [] }),
       ),
       ...contextRows,
+      ...segmentRows,
     ];
 
     const answer = await createChatCompletion({

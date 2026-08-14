@@ -1,7 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { Tiktoken } from "js-tiktoken/lite";
-import o200kBase from "js-tiktoken/ranks/o200k_base";
 import { createChatCompletion, createEmbeddings } from "@/lib/openai";
+import { countTokens } from "@/lib/token-count";
 
 // Hybrid Retrieval — shared by web/src/app/search/actions.ts (web Suche) and
 // web/src/app/api/retrieve/route.ts (mobile's live retrieve_memory tool).
@@ -61,9 +60,13 @@ const DEFAULT_MIN_RELEVANCE = 0.35;
 const CONSERVATIVE_VECTOR_THRESHOLD = 0.3;
 const DEFAULT_MEMORY_CANDIDATE_COUNT = 30;
 const DEFAULT_CONTEXT_CANDIDATE_COUNT = 10;
+// Smaller than the other two: segment content is a whole topic-grouped
+// passage (often several sentences), not an atomic fact or a short
+// description, so pulling as many rows would let 1-2 segments dominate the
+// token budget.
+const DEFAULT_SEGMENT_CANDIDATE_COUNT = 4;
 export const DEFAULT_RETRIEVAL_TOKEN_BUDGET = 2500;
 const MAX_QUERY_LENGTH = 500;
-const retrievalEncoding = new Tiktoken(o200kBase);
 
 export type RerankMode = { mode: "off" } | { mode: "llm"; timeoutMs?: number };
 
@@ -97,7 +100,21 @@ export interface RetrievedContext {
   relevance_score: number;
 }
 
-export type RetrievedSource = RetrievedMemoryItem | RetrievedContext;
+export interface RetrievedSegment {
+  kind: "segment";
+  id: string;
+  content: string;
+  source_type: string;
+  created_at: string;
+  similarity: number;
+  fts_rank: number;
+  relevance_score: number;
+}
+
+export type RetrievedSource =
+  | RetrievedMemoryItem
+  | RetrievedContext
+  | RetrievedSegment;
 
 export interface RetrievalUsage {
   usedTokens: number;
@@ -145,9 +162,20 @@ interface ContextCandidateRow {
   fused_score: number;
 }
 
+interface SegmentCandidateRow {
+  id: string;
+  content: string;
+  source_type: string;
+  created_at: string;
+  similarity: number;
+  fts_rank: number;
+  fused_score: number;
+}
+
 type Candidate =
   | (MemoryItemCandidateRow & { kind: "memory_item" })
-  | (ContextCandidateRow & { kind: "context" });
+  | (ContextCandidateRow & { kind: "context" })
+  | (SegmentCandidateRow & { kind: "segment" });
 
 function buildRerankSystemPrompt(): string {
   return `Du bewertest für eine Retrieval-Pipeline, wie relevant gefundene Kandidaten (Memory-Items und Kontext-Beschreibungen aus dem persönlichen Wissen eines Nutzers) für eine Suchanfrage inhaltlich wirklich sind — nicht nur oberflächlich ähnlich, sondern ob der Inhalt tatsächlich zur Beantwortung beiträgt.
@@ -159,21 +187,26 @@ Vergib für JEDEN Kandidaten (per id, jede id aus der Liste genau einmal) einen 
 }
 
 function buildRerankUserPrompt(query: string, candidates: Candidate[]): string {
-  const items = candidates.map((c) =>
-    c.kind === "memory_item"
-      ? {
+  const items = candidates.map((c) => {
+    switch (c.kind) {
+      case "memory_item":
+        return {
           id: c.id,
           kind: c.kind,
           type: c.type,
           content: c.content,
           occurred_at: c.occurred_at,
-        }
-      : {
+        };
+      case "segment":
+        return { id: c.id, kind: c.kind, content: c.content };
+      case "context":
+        return {
           id: c.id,
           kind: c.kind,
           content: c.description ? `${c.name}: ${c.description}` : c.name,
-        },
-  );
+        };
+    }
+  });
   return `## Anfrage\n${query}\n\n## Kandidaten\n${JSON.stringify(items)}`;
 }
 
@@ -255,12 +288,18 @@ function sourceTokenCount(source: RetrievedSource): number {
           confidence: source.confidence,
           occurred_at: source.occurred_at,
         }
-      : {
-          type: "kontext_beschreibung",
-          name: source.name,
-          description: source.description,
-        };
-  return retrievalEncoding.encode(JSON.stringify(promptSource)).length;
+      : source.kind === "segment"
+        ? {
+            type: "segment",
+            content: source.content,
+            source_type: source.source_type,
+          }
+        : {
+            type: "kontext_beschreibung",
+            name: source.name,
+            description: source.description,
+          };
+  return countTokens(JSON.stringify(promptSource));
 }
 
 function applyTokenBudget(
@@ -297,6 +336,7 @@ export async function hybridRetrieve(params: {
   userId: string;
   memoryCandidateCount?: number;
   contextCandidateCount?: number;
+  segmentCandidateCount?: number;
   tokenBudget?: number;
   minScore?: number;
   filters?: RetrievalFilters;
@@ -308,6 +348,7 @@ export async function hybridRetrieve(params: {
     userId,
     memoryCandidateCount = DEFAULT_MEMORY_CANDIDATE_COUNT,
     contextCandidateCount = DEFAULT_CONTEXT_CANDIDATE_COUNT,
+    segmentCandidateCount = DEFAULT_SEGMENT_CANDIDATE_COUNT,
     tokenBudget = DEFAULT_RETRIEVAL_TOKEN_BUDGET,
     minScore = DEFAULT_MIN_RELEVANCE,
     filters,
@@ -325,7 +366,7 @@ export async function hybridRetrieve(params: {
     queryEmbedding = null;
   }
 
-  const [memoryItemsResult, contextsResult] = await Promise.all([
+  const [memoryItemsResult, contextsResult, segmentsResult] = await Promise.all([
     supabase.rpc("match_memory_items", {
       query_embedding: queryEmbedding,
       query_text: query,
@@ -343,18 +384,27 @@ export async function hybridRetrieve(params: {
       match_count: contextCandidateCount,
       match_context_id: filters?.contextId ?? null,
     }),
+    supabase.rpc("match_segments", {
+      query_embedding: queryEmbedding,
+      query_text: query,
+      match_context_space_id: contextSpaceId,
+      match_count: segmentCandidateCount,
+    }),
   ]);
 
   if (memoryItemsResult.error) throw new Error(memoryItemsResult.error.message);
   if (contextsResult.error) throw new Error(contextsResult.error.message);
+  if (segmentsResult.error) throw new Error(segmentsResult.error.message);
 
   const memoryItemRows = (memoryItemsResult.data ??
     []) as MemoryItemCandidateRow[];
   const contextRows = (contextsResult.data ?? []) as ContextCandidateRow[];
+  const segmentRows = (segmentsResult.data ?? []) as SegmentCandidateRow[];
 
   const candidates: Candidate[] = [
     ...memoryItemRows.map((row) => ({ ...row, kind: "memory_item" as const })),
     ...contextRows.map((row) => ({ ...row, kind: "context" as const })),
+    ...segmentRows.map((row) => ({ ...row, kind: "segment" as const })),
   ];
 
   if (candidates.length === 0) {
@@ -380,9 +430,14 @@ export async function hybridRetrieve(params: {
 
   const scored = candidates.map((c): RetrievedSource => {
     const relevance_score = relevanceById?.get(c.id) ?? c.fused_score;
-    return c.kind === "memory_item"
-      ? { ...c, kind: "memory_item", relevance_score }
-      : { ...c, kind: "context", relevance_score };
+    switch (c.kind) {
+      case "memory_item":
+        return { ...c, kind: "memory_item", relevance_score };
+      case "segment":
+        return { ...c, kind: "segment", relevance_score };
+      case "context":
+        return { ...c, kind: "context", relevance_score };
+    }
   });
 
   const eligible = candidates
