@@ -1,5 +1,7 @@
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
+import { getConfirmedActiveContext } from "@/lib/active-context";
 import { corsJson, corsPreflight } from "@/lib/cors";
+import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
 
 // Mints a short-lived OpenAI Realtime API token for the mobile app's next
 // Dialog-Session (see ADR 0001, docs/implementation-plan.md Phase 2). The
@@ -20,11 +22,51 @@ const TOKEN_LIFETIME_SECONDS = 600;
 // The three Dialogzustaende from CONTEXT.md ("Dialogzustand"), driven by
 // Function-Calling rather than plain prompting so the client (mobile's
 // RealtimeDialogController) gets a structured, reliable signal instead of
-// having to parse spoken/text output. "Aktiver Kontext" (CONTEXT.md) is
-// deliberately NOT implemented yet — retrieve_memory searches the whole
-// Context Space, same as web/src/app/search. Realtime API tool schemas
+// having to parse spoken/text output. The confirmed active context is loaded
+// into this session; explicitly named alternatives are temporary retrieval
+// scopes, while permanent changes require a two-step tool confirmation.
+// Realtime API tool schemas
 // are flat ({type, name, description, parameters}), unlike Chat
 // Completions' nested {type: "function", function: {...}}.
+//
+// Shared by retrieve_memory and search_context_and_web below — both hit the
+// same hybrid-retrieval backend (api/retrieve/route.ts) and take the same
+// optional Metadatenfilter, so the schema fragment is defined once to keep
+// the (long) memory_type enum from drifting between the two copies.
+const RETRIEVAL_FILTER_PROPERTIES = {
+  context_name: {
+    type: "string",
+    description:
+      'Optional: nur innerhalb dieses vom Nutzer genannten Kontexts suchen, so wie gesagt (z. B. "Sport Erfolge"). Nur setzen, wenn ein Kontext eindeutig genannt wurde.',
+  },
+  memory_type: {
+    type: "string",
+    enum: [
+      "fakt",
+      "entscheidung",
+      "aufgabe",
+      "idee",
+      "annahme",
+      "offene_frage",
+      "ziel",
+      "risiko",
+      "person",
+      "termin",
+      "ergebnis",
+      "erkenntnis",
+    ],
+    description: "Optional: nur diesen Memory-Item-Typ berücksichtigen.",
+  },
+  occurred_from: {
+    type: "string",
+    description: "Optional: ISO-Datum, nur Einträge ab diesem Zeitpunkt.",
+  },
+  occurred_to: {
+    type: "string",
+    description: "Optional: ISO-Datum, nur Einträge bis zu diesem Zeitpunkt.",
+  },
+} as const;
+
 const TOOLS = [
   {
     type: "function",
@@ -49,7 +91,7 @@ const TOOLS = [
     type: "function",
     name: "retrieve_memory",
     description:
-      'Durchsucht bereits gespeichertes Wissen aus FRÜHEREN Gesprächen, Dokumenten und Notizen per Vektorsuche (sowohl einzelne Memory-Items als auch Kontext-Beschreibungen) — NICHT für Dinge, die der Nutzer gerade erst in diesem laufenden Gespräch gesagt hat (die stehen bereits im Gesprächsverlauf, dafür brauchst du diese Funktion nicht). Nur aufrufen, nachdem set_dialog_state mit state="antworten" aufgerufen wurde, und nur wenn die Antwort wirklich Wissen von außerhalb dieses Gesprächs braucht. Formuliere die query als Suchbegriffe für das, wonach du suchst — nicht zwangsläufig die Nutzerfrage wörtlich.',
+      'Durchsucht bereits gespeichertes Wissen aus FRÜHEREN Gesprächen, Dokumenten und Notizen per Hybrid-Suche (Embeddings + Volltextsuche, sowohl einzelne Memory-Items als auch Kontext-Beschreibungen) — NICHT für Dinge, die der Nutzer gerade erst in diesem laufenden Gespräch gesagt hat (die stehen bereits im Gesprächsverlauf, dafür brauchst du diese Funktion nicht). Ohne context_name wird automatisch zuerst im bestätigten aktiven Kontext gesucht; nur wenn dort nichts passt, erweitert das Backend kontrolliert auf den Context Space. Ein ausdrücklich genannter anderer context_name gilt nur für diesen Aufruf als temporärer Fokus und ändert den Standard nicht. Nur aufrufen, nachdem set_dialog_state mit state="antworten" aufgerufen wurde, und nur wenn die Antwort wirklich Wissen von außerhalb dieses Gesprächs braucht. Formuliere die query als Suchbegriffe für das, wonach du suchst — nicht zwangsläufig die Nutzerfrage wörtlich. context_name/memory_type/occurred_from/occurred_to sind optional und engen die Suche ein — nur setzen, wenn die Frage sie eindeutig hergibt, sonst weglassen statt zu raten. Enthält das Ergebnis "ambiguous_context" oder "context_not_found", wurde NICHT gesucht — wechsle zu state="nachfragen" und kläre den Kontext, statt zu raten.',
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -58,6 +100,7 @@ const TOOLS = [
           type: "string",
           description: "Suchanfrage in Stichworten oder als kurzer Satz.",
         },
+        ...RETRIEVAL_FILTER_PROPERTIES,
       },
       required: ["query"],
     },
@@ -80,15 +123,96 @@ const TOOLS = [
       required: ["context_name"],
     },
   },
+  {
+    type: "function",
+    name: "propose_active_context_switch",
+    description:
+      "Bereitet einen dauerhaften Wechsel des Standardkontexts vor, speichert ihn aber noch NICHT. Rufe dies nur auf, wenn der Nutzer ausdrücklich dauerhaft zu einem benannten Kontext wechseln möchte. Nach dem Ergebnis musst du den Nutzer kurz um Ja/Nein-Bestätigung bitten.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        context_name: {
+          type: "string",
+          description: "Name des gewünschten neuen Standardkontexts.",
+        },
+      },
+      required: ["context_name"],
+    },
+  },
+  {
+    type: "function",
+    name: "confirm_active_context_switch",
+    description:
+      "Bestätigt den zuvor vorbereiteten Wechsel. Nur aufrufen, wenn direkt zuvor ein Wechsel vorgeschlagen wurde und der Nutzer jetzt eindeutig zustimmt. Ohne ausstehenden Vorschlag wird nichts geändert.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+    },
+  },
+  {
+    type: "function",
+    name: "cancel_active_context_switch",
+    description:
+      "Verwirft einen zuvor vorbereiteten Kontextwechsel. Nur bei ausdrücklicher Ablehnung oder Korrektur durch den Nutzer aufrufen.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+    },
+  },
+  {
+    type: "function",
+    name: "search_web",
+    description:
+      "Durchsucht das öffentliche Internet. Verwende diese Funktion für aktuelle Informationen (z. B. Nachrichten, Wetter, Preise, Fahrpläne oder heutige Ereignisse) und für allgemeine externe Wissensfragen, deren Antwort nicht aus dem laufenden Gespräch oder dem persönlichen gespeicherten Wissen des Nutzers kommen soll. Formuliere die query als vollständige, präzise Suchfrage.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        query: {
+          type: "string",
+          description: "Präzise Suchfrage für das öffentliche Internet.",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    type: "function",
+    name: "search_context_and_web",
+    description:
+      'Durchsucht mit derselben Frage ZWINGEND sowohl das persönliche gespeicherte Wissen des Nutzers als auch das öffentliche Internet. Verwende diese Funktion für Vergleiche, Bewertungen oder Empfehlungen, die persönliche Projekte, Pläne, Firmen, Entscheidungen oder Notizen MIT aktuellen beziehungsweise externen Informationen verbinden sollen. Beispiele: "Vergleiche unsere Strategie mit aktuellen Markttrends", "Passt mein gespeicherter Reiseplan zum heutigen Wetter?", "Prüfe mein Vorhaben gegen den aktuellen Stand". Nicht durch getrennte Einzelaufrufe ersetzen. Ohne context_name startet der persönliche Teil im aktiven Kontext und erweitert nur bei null Treffern auf den Context Space. Ein ausdrücklich genannter context_name ist nur ein temporärer Fokus. Nur nach set_dialog_state mit state="antworten" aufrufen. memory_type/occurred_from/occurred_to engen ebenfalls nur den persönlichen Kontext-Teil ein. Enthält das Ergebnis "personal_context.ambiguous_context" oder "personal_context.context_not_found", wechsle zu state="nachfragen" statt zu antworten.',
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        query: {
+          type: "string",
+          description:
+            "Vollständige Frage, die sowohl gegen den persönlichen Context als auch gegen aktuelle externe Quellen geprüft werden soll.",
+        },
+        ...RETRIEVAL_FILTER_PROPERTIES,
+      },
+      required: ["query"],
+    },
+  },
 ] as const;
 
-function buildInstructions(): string {
+function buildInstructions(activeContextName?: string): string {
+  const activeContextInstruction = activeContextName
+    ? `Der bestätigte Standardkontext ist "${activeContextName}". Suche persönliche Informationen standardmäßig zuerst dort. Nennt der Nutzer für eine einzelne Frage eindeutig einen anderen Kontext, verwende diesen als temporären Fokus über context_name, ohne den Standard zu ändern. Ein dauerhafter Wechsel erfolgt ausschließlich über propose_active_context_switch und nach einem späteren eindeutigen Ja über confirm_active_context_switch.`
+    : "Es ist noch kein Standardkontext bestätigt. Suche ohne expliziten Kontext im gesamten Context Space. Einen dauerhaften Standard darfst du nur über propose_active_context_switch und eine spätere eindeutige Bestätigung setzen.";
+
   return `Du bist die Live-Dialog-KI der KI Voice Context Engine — einer persönlichen Wissens-App. Der Nutzer spricht frei mit dir, wie mit einem Kollegen im Auto. Alles, was er sagt, wird als Wissen erfasst (nachgelagert, nicht live — darum musst du dich nicht kümmern, und frag ihn auch nie, ob du dir etwas merken sollst: das passiert automatisch im Hintergrund, unabhängig davon, was er auf so eine Frage antworten würde).
+
+${activeContextInstruction}
 
 In jeder Antwort-Runde gehst du so vor:
 1. Rufe zuerst IMMER set_dialog_state auf und wähle genau einen der drei Zustände:
    - "zuhoeren": Der Nutzer berichtet, denkt laut nach, trifft eine Aussage oder Entscheidung — es gibt nichts, worauf du sinnvoll antworten müsstest. Sprich in diesem Fall danach NICHT — keine Bestätigung, kein Kommentar, keine Nachfrage, und insbesondere keine Frage, ob du dir das merken sollst.
-   - "antworten": Der Nutzer stellt eine echte Frage. Nur wenn er die nötige Info WÖRTLICH gerade eben selbst in diesem Gespräch genannt hat, antworte direkt daraus, ohne weitere Funktionsaufrufe; dafür ist dein normales Gesprächsgedächtnis da. Nennt der Nutzer einen konkreten Kontext-Namen und will dessen Inhalt wissen (z. B. "was ist alles in Sport Erfolge"), rufe list_context_items auf — das ist ein strukturiertes Auflisten, keine Ähnlichkeitssuche, und funktioniert deshalb auch für generische "zeig mir alles"-Fragen, bei denen retrieve_memory nichts findet. In JEDEM anderen Fall rufe retrieve_memory auf — AUCH wenn du glaubst, die Antwort nicht zu kennen, UND AUCH wenn der Name (z. B. einer Firma) dir aus deinem Trainingswissen bekannt vorkommt: verwende NIE dein allgemeines Wissen über eine dem Nutzer gehörende Firma, Person oder Sache, um eine Lücke zu füllen, statt retrieve_memory oder list_context_items aufzurufen — was du "eigentlich schon zu wissen glaubst" ist nicht das, was der Nutzer über SEINE konkrete Firma/Person gespeichert hat. Sag niemals "das weiß ich nicht" oder "darüber haben wir noch nicht gesprochen", ohne vorher retrieve_memory oder list_context_items versucht zu haben. Stütze dich in allen Fällen ausschließlich auf das, was die Funktion liefert. Findet sie nichts Passendes, sag das ehrlich, statt zu raten oder aus allgemeinem Wissen zu antworten.
+   - "antworten": Der Nutzer stellt eine echte Frage. Nur wenn er die nötige Info WÖRTLICH gerade eben selbst in diesem Gespräch genannt hat, antworte direkt daraus, ohne weitere Funktionsaufrufe; dafür ist dein normales Gesprächsgedächtnis da. Nennt der Nutzer einen konkreten Kontext-Namen und will ausschließlich dessen Inhalt wissen (z. B. "was ist alles in Sport Erfolge"), rufe list_context_items auf. Verlangt die Frage einen Vergleich, eine Bewertung oder eine Empfehlung, bei der persönliches gespeichertes Wissen UND aktuelle beziehungsweise externe Informationen nötig sind, rufe IMMER search_context_and_web auf. Verwende dafür nicht nur retrieve_memory oder nur search_web. Geht es ausschließlich um aktuelle öffentliche Informationen (z. B. Nachrichten, Wetter, Preise, Fahrpläne oder heutige Ereignisse) oder ausschließlich um eine allgemeine Frage über die Außenwelt, rufe search_web auf. Geht es ausschließlich um das persönliche Wissen, die Projekte, Firmen, Personen, Entscheidungen oder Notizen des Nutzers, rufe retrieve_memory auf — AUCH wenn dir ein Name aus deinem Trainingswissen bekannt vorkommt. Verwende NIE allgemeines Trainingswissen als Ersatz für einen passenden Funktionsaufruf. Stütze deine Antwort ausschließlich auf das laufende Gespräch und die gelieferten Funktionsergebnisse. Nach search_context_and_web unterscheide inhaltlich klar zwischen "In deinem Context" und "Aus aktuellen externen Informationen" und leite anschließend ein gemeinsames Fazit ab. Wenn eine der beiden Suchen nichts Passendes findet oder fehlschlägt, sage ausdrücklich, welche Quelle fehlt, statt zu raten.
    - "nachfragen": Du bist dir bei etwas Wesentlichem unsicher, das die Antwort oder die spätere Einordnung des Gesagten betrifft. Stell danach direkt eine kurze, gezielte Rückfrage — keine Retrieval nötig.
 2. Sei bei "antworten" und "nachfragen" kurz und gesprochen-natürlich, wie im echten Gespräch, nicht wie ein Textdokument.
 3. Antworte ausschließlich auf Deutsch.`;
@@ -110,6 +234,7 @@ export async function POST(request: Request) {
   const supabase = createSupabaseClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    { global: { headers: { Authorization: `Bearer ${accessToken}` } } },
   );
   const {
     data: { user },
@@ -119,6 +244,13 @@ export async function POST(request: Request) {
   if (authError || !user) {
     return corsJson({ error: "Not authenticated" }, { status: 401 });
   }
+
+  const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
+  const activeContext = await getConfirmedActiveContext(
+    supabase,
+    contextSpaceId,
+    user.id,
+  );
 
   const apiKey = process.env.OPENAI_API_KEY;
   const baseUrl = process.env.OPENAI_API_BASE_URL ?? "https://api.openai.com";
@@ -143,7 +275,7 @@ export async function POST(request: Request) {
       session: {
         type: "realtime",
         model: REALTIME_MODEL,
-        instructions: buildInstructions(),
+        instructions: buildInstructions(activeContext?.name),
         audio: {
           input: {
             format: { type: "audio/pcm", rate: 24000 },
@@ -205,6 +337,7 @@ export async function POST(request: Request) {
   return corsJson({
     token: value,
     expiresAt: expires_at,
+    activeContext,
     // Keeps WebRTC signaling on the same regional OpenAI API origin that
     // minted the client secret (for example the configured EU endpoint).
     realtimeUrl: `${baseUrl}/v1/realtime/calls`,

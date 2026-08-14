@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../core/api/active_context_client.dart';
 import '../../core/api/dialog_processing_client.dart';
 import '../../core/data/context_summary_repository.dart';
 import '../../core/data/dialog_session_repository.dart';
@@ -38,6 +39,7 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
   StreamSubscription<double>? _audioLevelSubscription;
   StreamSubscription<String>? _liveTranscriptSubscription;
   StreamSubscription<bool>? _thinkingSubscription;
+  StreamSubscription<ActiveContext?>? _activeContextSubscription;
   String? _dialogSessionId;
   String? _dialogState;
   String _liveTranscript = '';
@@ -46,6 +48,7 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
   bool _sessionActive = false;
   bool _sessionChanging = false;
   bool _isThinking = false;
+  ActiveContext? _activeContext;
   late Future<List<ContextSummary>> _contextSummaries;
 
   @override
@@ -70,6 +73,10 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
     });
     _thinkingSubscription = _controller.thinking.listen((isThinking) {
       if (mounted) setState(() => _isThinking = isThinking);
+    });
+    _activeContextSubscription =
+        _controller.activeContexts.listen((activeContext) {
+      if (mounted) setState(() => _activeContext = activeContext);
     });
   }
 
@@ -97,7 +104,9 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
         _audioLevels.setAll(0, List<double>.filled(_waveformBarCount, 0));
         await _controller.startSession();
         try {
-          _dialogSessionId = await _sessionRepository.startSession();
+          _dialogSessionId = await _sessionRepository.startSession(
+            startedContextId: _controller.activeContext?.id,
+          );
         } catch (_) {
           // Don't leave a WebRTC session running that we can't record —
           // Segmentation Engine (Phase 2) needs the persisted row later.
@@ -173,12 +182,53 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
         _ => dialogState,
       };
 
+  Future<void> _selectActiveContext(ContextSummary summary) async {
+    if (summary.isActive) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Standardkontext ändern?'),
+        content: Text(
+          'Soll „${summary.name}“ bei neuen Sessions dein '
+          'Standardkontext sein?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Abbrechen'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Bestätigen'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await _contextSummaryRepository.setActiveContext(summary.id);
+      if (mounted) {
+        setState(() {
+          _activeContext = ActiveContext(id: summary.id, name: summary.name);
+          _contextSummaries = _contextSummaryRepository.fetchSummaries();
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Kontextwechsel fehlgeschlagen: $error')),
+        );
+      }
+    }
+  }
+
   @override
   void dispose() {
     unawaited(_dialogStateSubscription?.cancel());
     unawaited(_audioLevelSubscription?.cancel());
     unawaited(_liveTranscriptSubscription?.cancel());
     unawaited(_thinkingSubscription?.cancel());
+    unawaited(_activeContextSubscription?.cancel());
     unawaited(_controller.dispose());
     super.dispose();
   }
@@ -265,6 +315,13 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
                           : 'Session starten',
                 ),
               ),
+              if (_activeContext != null) ...[
+                const SizedBox(height: 12),
+                Chip(
+                  avatar: const Icon(Icons.adjust, size: 18),
+                  label: Text('Aktiver Kontext: ${_activeContext!.name}'),
+                ),
+              ],
               if (_sessionActive && _dialogState != null) ...[
                 const SizedBox(height: 16),
                 Text(
@@ -274,7 +331,10 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
               ],
               if (!_sessionActive) ...[
                 const SizedBox(height: 36),
-                _ContextSummaryList(summaries: _contextSummaries),
+                _ContextSummaryList(
+                  summaries: _contextSummaries,
+                  onSelect: _selectActiveContext,
+                ),
               ],
             ],
           ),
@@ -285,9 +345,13 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
 }
 
 class _ContextSummaryList extends StatelessWidget {
-  const _ContextSummaryList({required this.summaries});
+  const _ContextSummaryList({
+    required this.summaries,
+    required this.onSelect,
+  });
 
   final Future<List<ContextSummary>> summaries;
+  final ValueChanged<ContextSummary> onSelect;
 
   @override
   Widget build(BuildContext context) {
@@ -329,8 +393,16 @@ class _ContextSummaryList extends StatelessWidget {
                   children: [
                     for (var index = 0; index < items.length; index++) ...[
                       ListTile(
-                        leading: const Icon(Icons.folder_outlined),
+                        leading: Icon(
+                          items[index].isActive
+                              ? Icons.adjust
+                              : Icons.folder_outlined,
+                        ),
                         title: Text(items[index].name),
+                        subtitle: items[index].isActive
+                            ? const Text('Standardkontext')
+                            : null,
+                        onTap: () => onSelect(items[index]),
                         trailing: Container(
                           padding: const EdgeInsets.symmetric(
                             horizontal: 10,

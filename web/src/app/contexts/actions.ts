@@ -55,3 +55,34 @@ export async function createContext(
   revalidatePath("/contexts");
   return undefined;
 }
+
+export async function setActiveContext(formData: FormData) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+
+  const contextId = (formData.get("contextId") as string | null)?.trim();
+  if (!contextId) return;
+  const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
+  const { data: context } = await supabase
+    .from("contexts")
+    .select("id")
+    .eq("id", contextId)
+    .eq("context_space_id", contextSpaceId)
+    .maybeSingle();
+  if (!context) return;
+
+  const { error } = await supabase.from("active_context_preferences").upsert(
+    {
+      context_space_id: contextSpaceId,
+      user_id: user.id,
+      default_context_id: context.id,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "context_space_id,user_id" },
+  );
+  if (error) throw error;
+  revalidatePath("/contexts");
+}

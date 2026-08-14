@@ -3,16 +3,20 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'active_context_client.dart';
+
 class RealtimeToken {
   RealtimeToken({
     required this.token,
     required this.expiresAt,
     this.realtimeEndpoint,
+    this.activeContext,
   });
 
   final String token;
   final DateTime expiresAt;
   final Uri? realtimeEndpoint;
+  final ActiveContext? activeContext;
 }
 
 /// Fetches a short-lived OpenAI Realtime API token from our backend
@@ -53,6 +57,10 @@ class EphemeralTokenClient {
       ),
       realtimeEndpoint: switch (body['realtimeUrl']) {
         final String url => Uri.parse(url),
+        _ => null,
+      },
+      activeContext: switch (body['activeContext']) {
+        final Map<String, dynamic> value => ActiveContext.fromJson(value),
         _ => null,
       },
     );

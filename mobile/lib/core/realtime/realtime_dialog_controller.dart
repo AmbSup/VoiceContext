@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
+import '../api/active_context_client.dart';
 import '../api/ephemeral_token_client.dart';
 import '../api/retrieval_client.dart';
 
@@ -41,7 +42,13 @@ const _fillerInstructions =
 const _continueAfterFillerInstructions =
     'Rufe jetzt die passende Funktion auf (retrieve_memory für thematische '
     'Suche, list_context_items falls ein konkreter Kontext-Name genannt '
-    'wurde), um die vorhin gestellte Frage zu beantworten.';
+    'wurde, search_web für ausschließlich aktuelle oder allgemeine externe '
+    'Informationen, search_context_and_web wenn persönlicher Context mit '
+    'aktuellen oder externen Informationen verglichen oder verbunden werden soll, '
+    'propose_active_context_switch wenn ausdrücklich ein dauerhafter '
+    'Standardkontext-Wechsel gewünscht wurde, confirm_active_context_switch '
+    'bei einer eindeutigen Bestätigung des offenen Vorschlags), '
+    'um die vorhin gestellte Frage zu beantworten.';
 const _offerHelpInstructions =
     'Sag jetzt ausschlieÃŸlich: "Wie kann ich dir helfen?" Keine '
     'Funktionsaufrufe und nichts anderes.';
@@ -65,16 +72,19 @@ const _rawAudioEventTypes = {
 class RealtimeDialogController {
   RealtimeDialogController({
     EphemeralTokenClient? tokenClient,
+    ActiveContextClient? activeContextClient,
     RetrievalClient? retrievalClient,
     http.Client? httpClient,
     Uri? realtimeEndpoint,
   })  : _tokenClient = tokenClient ?? EphemeralTokenClient(),
+        _activeContextClient = activeContextClient ?? ActiveContextClient(),
         _retrievalClient = retrievalClient ?? RetrievalClient(),
         _httpClient = httpClient ?? http.Client(),
         _ownsHttpClient = httpClient == null,
         _realtimeEndpointOverride = realtimeEndpoint;
 
   final EphemeralTokenClient _tokenClient;
+  final ActiveContextClient _activeContextClient;
   final RetrievalClient _retrievalClient;
   final http.Client _httpClient;
   final bool _ownsHttpClient;
@@ -87,6 +97,7 @@ class RealtimeDialogController {
   final _audioLevelController = StreamController<double>.broadcast();
   final _liveTranscriptController = StreamController<String>.broadcast();
   final _thinkingController = StreamController<bool>.broadcast();
+  final _activeContextController = StreamController<ActiveContext?>.broadcast();
 
   RTCPeerConnection? _peerConnection;
   RTCDataChannel? _dataChannel;
@@ -99,6 +110,9 @@ class RealtimeDialogController {
   bool _awaitingFillerTurn = false;
   bool _isThinking = false;
   int _consecutiveListeningTurns = 0;
+  ActiveContext? _activeContext;
+  ActiveContext? _pendingActiveContext;
+  bool _pendingActiveContextHasUserReply = false;
   final _transcriptBuffer = StringBuffer();
   String? _liveTranscriptItemId;
   final _liveTranscriptBuffer = StringBuffer();
@@ -121,6 +135,8 @@ class RealtimeDialogController {
   /// True while the user's completed turn is being processed and until the
   /// assistant starts producing audio (or decides that no reply is needed).
   Stream<bool> get thinking => _thinkingController.stream;
+  Stream<ActiveContext?> get activeContexts => _activeContextController.stream;
+  ActiveContext? get activeContext => _activeContext;
 
   /// Live-building text of the user's current/most recent utterance, driven
   /// by `conversation.item.input_audio_transcription.delta` events (word by
@@ -165,6 +181,9 @@ class RealtimeDialogController {
 
     try {
       final realtimeToken = await _tokenClient.fetchEphemeralToken();
+      _setActiveContext(realtimeToken.activeContext);
+      _pendingActiveContext = null;
+      _pendingActiveContextHasUserReply = false;
       if (realtimeToken.expiresAt.isBefore(DateTime.now())) {
         throw RealtimeDialogException(
           'The Realtime client secret expired before the connection started.',
@@ -306,6 +325,7 @@ class RealtimeDialogController {
     await _audioLevelController.close();
     await _liveTranscriptController.close();
     await _thinkingController.close();
+    await _activeContextController.close();
   }
 
   void _configurePeerConnectionCallbacks(RTCPeerConnection peerConnection) {
@@ -438,6 +458,9 @@ class RealtimeDialogController {
       case 'conversation.item.input_audio_transcription.completed':
         final finalText = event['transcript'] as String?;
         if (finalText != null) {
+          if (_pendingActiveContext != null) {
+            _pendingActiveContextHasUserReply = true;
+          }
           _liveTranscriptItemId = itemId;
           _liveTranscriptController.add(finalText);
         }
@@ -499,6 +522,10 @@ class RealtimeDialogController {
     }
 
     if (functionCalls.isEmpty) {
+      if (_pendingActiveContextHasUserReply) {
+        _pendingActiveContext = null;
+        _pendingActiveContextHasUserReply = false;
+      }
       _setThinking(false);
       return;
     }
@@ -548,6 +575,23 @@ class RealtimeDialogController {
         case 'list_context_items':
           outputPayload = await _handleListContextItems(call);
           needsFollowUpResponse = true;
+        case 'search_web':
+          outputPayload = await _handleWebSearch(call);
+          needsFollowUpResponse = true;
+        case 'search_context_and_web':
+          outputPayload = await _handleContextAndWebSearch(call);
+          needsFollowUpResponse = true;
+        case 'propose_active_context_switch':
+          outputPayload = await _handleProposeActiveContext(call);
+          needsFollowUpResponse = true;
+        case 'confirm_active_context_switch':
+          outputPayload = await _handleConfirmActiveContext();
+          needsFollowUpResponse = true;
+        case 'cancel_active_context_switch':
+          _pendingActiveContext = null;
+          _pendingActiveContextHasUserReply = false;
+          outputPayload = jsonEncode({'status': 'cancelled'});
+          needsFollowUpResponse = true;
         default:
           outputPayload = jsonEncode({'error': 'unknown_function: $name'});
       }
@@ -566,6 +610,22 @@ class RealtimeDialogController {
         // nothing left to answer back to.
         return;
       }
+    }
+
+    final handledContextProposal = functionCalls.any((call) {
+      final name = call['name'];
+      return name == 'propose_active_context_switch' ||
+          name == 'confirm_active_context_switch' ||
+          name == 'cancel_active_context_switch';
+    });
+    final continuesAfterStateOrFiller = _awaitingFillerTurn ||
+        (needsFollowUpResponse &&
+            functionCalls.any((call) => call['name'] == 'set_dialog_state'));
+    if (_pendingActiveContextHasUserReply &&
+        !handledContextProposal &&
+        !continuesAfterStateOrFiller) {
+      _pendingActiveContext = null;
+      _pendingActiveContextHasUserReply = false;
     }
 
     if (needsFollowUpResponse) {
@@ -600,8 +660,18 @@ class RealtimeDialogController {
       return jsonEncode({'items': <dynamic>[]});
     }
     try {
-      final items = await _retrievalClient.retrieve(query);
-      return jsonEncode({'items': items});
+      final result = await _retrievalClient.retrieve(
+        query,
+        contextName: args['context_name'] as String?,
+        memoryType: args['memory_type'] as String?,
+        occurredFrom: args['occurred_from'] as String?,
+        occurredTo: args['occurred_to'] as String?,
+      );
+      // Passed through as-is: on an ambiguous context_name this carries
+      // 'ambiguous_context' instead of populated 'items' (see
+      // RetrievalClient.retrieve), which the model reacts to per its tool
+      // description in api/realtime-token/route.ts.
+      return jsonEncode(result);
     } catch (error) {
       return jsonEncode({'error': 'retrieval_failed: $error'});
     }
@@ -621,6 +691,89 @@ class RealtimeDialogController {
     }
   }
 
+  Future<String> _handleWebSearch(Map<String, dynamic> call) async {
+    final args = _decodeArguments(call['arguments']);
+    final query = args['query'] as String? ?? '';
+    if (query.isEmpty) {
+      return jsonEncode({'answer': ''});
+    }
+    try {
+      final answer = await _retrievalClient.searchWeb(query);
+      return jsonEncode({'answer': answer});
+    } catch (error) {
+      return jsonEncode({'error': 'web_search_failed: $error'});
+    }
+  }
+
+  Future<String> _handleContextAndWebSearch(
+    Map<String, dynamic> call,
+  ) async {
+    final args = _decodeArguments(call['arguments']);
+    final query = args['query'] as String? ?? '';
+    if (query.isEmpty) {
+      return jsonEncode({
+        'personal_context': {'items': <dynamic>[]},
+        'internet': {'answer': ''},
+      });
+    }
+
+    List<Map<String, dynamic>> contextItems = const [];
+    Object? ambiguousContext;
+    Object? contextNotFound;
+    Object? retrievalScope;
+    String? contextError;
+    String webAnswer = '';
+    String? webError;
+
+    await Future.wait<void>([
+      () async {
+        try {
+          final result = await _retrievalClient.retrieve(
+            query,
+            contextName: args['context_name'] as String?,
+            memoryType: args['memory_type'] as String?,
+            occurredFrom: args['occurred_from'] as String?,
+            occurredTo: args['occurred_to'] as String?,
+          );
+          contextItems =
+              (result['items'] as List<dynamic>? ?? const <dynamic>[])
+                  .cast<Map<String, dynamic>>();
+          ambiguousContext = result['ambiguous_context'];
+          contextNotFound = result['context_not_found'];
+          retrievalScope = result['retrieval_scope'];
+        } catch (error) {
+          contextError = 'context_retrieval_failed: $error';
+        }
+      }(),
+      () async {
+        try {
+          webAnswer = await _retrievalClient.searchWeb(query);
+        } catch (error) {
+          webError = 'web_search_failed: $error';
+        }
+      }(),
+    ]);
+
+    return jsonEncode({
+      'personal_context': {
+        'items': contextItems,
+        if (ambiguousContext != null) 'ambiguous_context': ambiguousContext,
+        if (contextNotFound != null) 'context_not_found': contextNotFound,
+        if (retrievalScope != null) 'retrieval_scope': retrievalScope,
+        if (contextError != null) 'error': contextError,
+      },
+      'internet': {
+        'answer': webAnswer,
+        if (webError != null) 'error': webError,
+      },
+      'answer_instructions':
+          'Beziehe beide Quellen in die Antwort ein. Kennzeichne klar, was '
+              'aus dem persönlichen Context und was aus dem Internet stammt, '
+              'und leite danach ein gemeinsames Fazit ab. Fehlt eine Quelle, '
+              'nenne das ausdrücklich.',
+    });
+  }
+
   Map<String, dynamic> _decodeArguments(dynamic raw) {
     if (raw is! String || raw.isEmpty) return const <String, dynamic>{};
     try {
@@ -630,6 +783,76 @@ class RealtimeDialogController {
           : const <String, dynamic>{};
     } on FormatException {
       return const <String, dynamic>{};
+    }
+  }
+
+  Future<String> _handleProposeActiveContext(
+    Map<String, dynamic> call,
+  ) async {
+    final args = _decodeArguments(call['arguments']);
+    final contextName = args['context_name'] as String? ?? '';
+    if (contextName.trim().isEmpty) {
+      _pendingActiveContext = null;
+      _pendingActiveContextHasUserReply = false;
+      return jsonEncode({'status': 'not_found'});
+    }
+    try {
+      final resolution = await _activeContextClient.resolve(contextName);
+      final candidate = resolution.context;
+      if (resolution.status == 'ambiguous') {
+        _pendingActiveContext = null;
+        _pendingActiveContextHasUserReply = false;
+        return jsonEncode({
+          'status': 'ambiguous',
+          'candidates': resolution.candidates,
+          'instruction': 'Frage, welcher Kontext gemeint ist.',
+        });
+      }
+      if (resolution.status != 'resolved' || candidate == null) {
+        _pendingActiveContext = null;
+        _pendingActiveContextHasUserReply = false;
+        return jsonEncode({'status': 'not_found'});
+      }
+      if (candidate.id == _activeContext?.id) {
+        _pendingActiveContext = null;
+        _pendingActiveContextHasUserReply = false;
+        return jsonEncode({
+          'status': 'already_active',
+          'active_context': candidate.name,
+        });
+      }
+      _pendingActiveContext = candidate;
+      _pendingActiveContextHasUserReply = false;
+      return jsonEncode({
+        'status': 'confirmation_required',
+        'candidate': candidate.name,
+        'instruction': 'Frage jetzt kurz: Soll ${candidate.name} dein neuer '
+            'Standardkontext werden?',
+      });
+    } catch (error) {
+      return jsonEncode({'error': 'context_resolution_failed: $error'});
+    }
+  }
+
+  Future<String> _handleConfirmActiveContext() async {
+    final pending = _pendingActiveContext;
+    if (pending == null) {
+      return jsonEncode({
+        'status': 'no_pending_proposal',
+        'instruction': 'Es wurde kein Kontextwechsel gespeichert.',
+      });
+    }
+    try {
+      final confirmed = await _activeContextClient.confirm(pending.id);
+      _pendingActiveContext = null;
+      _pendingActiveContextHasUserReply = false;
+      _setActiveContext(confirmed);
+      return jsonEncode({
+        'status': 'confirmed',
+        'active_context': confirmed.name,
+      });
+    } catch (error) {
+      return jsonEncode({'error': 'context_confirmation_failed: $error'});
     }
   }
 
@@ -671,6 +894,13 @@ class RealtimeDialogController {
     _isThinking = value;
     if (!_thinkingController.isClosed) {
       _thinkingController.add(value);
+    }
+  }
+
+  void _setActiveContext(ActiveContext? value) {
+    _activeContext = value;
+    if (!_activeContextController.isClosed) {
+      _activeContextController.add(value);
     }
   }
 

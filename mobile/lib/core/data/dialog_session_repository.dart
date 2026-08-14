@@ -14,7 +14,7 @@ class DialogSessionRepository {
   /// supabase/migrations/0004_bootstrap_context_space.sql), so it's
   /// resolved directly here rather than asking the user to pick one —
   /// Context-Space-Verwaltung (Phase 5) will replace this lookup.
-  Future<String> startSession() async {
+  Future<String> startSession({String? startedContextId}) async {
     final userId = _client.auth.currentUser!.id;
 
     final contextSpace = await _client
@@ -28,6 +28,7 @@ class DialogSessionRepository {
         .insert({
           'context_space_id': contextSpace['id'] as String,
           'user_id': userId,
+          if (startedContextId != null) 'started_context_id': startedContextId,
         })
         .select('id')
         .single();
@@ -35,7 +36,8 @@ class DialogSessionRepository {
     return row['id'] as String;
   }
 
-  Future<void> endSession(String dialogSessionId, {String? fullTranscript}) async {
+  Future<void> endSession(String dialogSessionId,
+      {String? fullTranscript}) async {
     await _client.from('dialog_sessions').update({
       'ended_at': DateTime.now().toUtc().toIso8601String(),
       if (fullTranscript != null && fullTranscript.isNotEmpty)
