@@ -20,36 +20,31 @@ export function AssignContextForm({
     undefined,
   );
 
-  if (contexts.length === 0) {
-    return (
-      <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-500">
-        Noch kein Kontext angelegt, dem du zuordnen könntest.
-      </p>
-    );
-  }
-
   return (
     <form action={formAction} className="mt-3 flex flex-wrap items-center gap-2">
       <input type="hidden" name="memory_item_id" value={memoryItemId} />
       <select
         name="context_id"
-        required
         defaultValue=""
-        className="rounded border border-black/[.08] bg-transparent px-2 py-1 text-sm text-black dark:border-white/[.145] dark:text-zinc-50"
+        className="min-w-44 rounded border border-black/[.08] bg-transparent px-2 py-1.5 text-sm text-black dark:border-white/[.145] dark:text-zinc-50"
       >
-        <option value="" disabled>
-          Kontext wählen …
-        </option>
+        <option value="">Bestehenden Kontext wählen …</option>
         {contexts.map((context) => (
           <option key={context.id} value={context.id}>
             {context.name}
           </option>
         ))}
       </select>
+      <span className="text-xs text-zinc-400">oder</span>
+      <input
+        name="manual_context_name"
+        placeholder="Neuen Kontext eingeben"
+        className="min-w-48 flex-1 rounded border border-black/[.08] bg-transparent px-2 py-1.5 text-sm text-black placeholder:text-zinc-400 dark:border-white/[.145] dark:text-zinc-50"
+      />
       <button
         type="submit"
         disabled={pending}
-        className="rounded-full bg-foreground px-3 py-1 text-xs font-medium text-background transition-colors hover:bg-[#383838] disabled:opacity-50 dark:hover:bg-[#ccc]"
+        className="rounded-full bg-foreground px-3 py-1.5 text-xs font-medium text-background transition-colors hover:bg-[#383838] disabled:opacity-50 dark:hover:bg-[#ccc]"
       >
         {pending ? "Zuordnen …" : "Zuordnen"}
       </button>
