@@ -97,6 +97,7 @@ class RealtimeDialogController {
   final _audioLevelController = StreamController<double>.broadcast();
   final _liveTranscriptController = StreamController<String>.broadcast();
   final _thinkingController = StreamController<bool>.broadcast();
+  final _processingActivityController = StreamController<String>.broadcast();
   final _activeContextController = StreamController<ActiveContext?>.broadcast();
 
   RTCPeerConnection? _peerConnection;
@@ -147,6 +148,17 @@ class RealtimeDialogController {
   /// first delta of a new utterance — in between, the display simply keeps
   /// showing the last completed line rather than flashing empty.
   Stream<String> get liveTranscript => _liveTranscriptController.stream;
+
+  /// What the model actually acted on for the just-finished response —
+  /// e.g. `retrieve_memory: "Fahrrad"` — as opposed to [liveTranscript],
+  /// which is a completely separate transcription model's best guess at
+  /// the same audio. gpt-realtime is audio-native: it never sees
+  /// [liveTranscript] as input, so the two can legitimately diverge on
+  /// unclear audio. Derived from the model's own function-call arguments
+  /// (the one place its interpretation becomes text), not from any
+  /// transcription — this is the closest thing to ground truth for "what
+  /// did it understand" that the Realtime API exposes.
+  Stream<String> get processingActivity => _processingActivityController.stream;
   RealtimeConnectionState get state => _state;
   bool get isConnected => _state == RealtimeConnectionState.connected;
 
@@ -326,6 +338,7 @@ class RealtimeDialogController {
     await _liveTranscriptController.close();
     await _thinkingController.close();
     await _activeContextController.close();
+    await _processingActivityController.close();
   }
 
   void _configurePeerConnectionCallbacks(RTCPeerConnection peerConnection) {
@@ -362,6 +375,7 @@ class RealtimeDialogController {
           _recordTranscript(decoded);
           _handleLiveUserTranscript(decoded);
           _handleThinkingState(decoded);
+          _handleProcessingActivity(decoded);
           _eventController.add(decoded);
           if (decoded['type'] == 'response.done') {
             unawaited(_handleResponseDone(decoded));
@@ -371,6 +385,36 @@ class RealtimeDialogController {
         _eventController.addError(error, stackTrace);
       }
     };
+  }
+
+  // The keys, in preference order, most likely to actually say something
+  // meaningful about what the model understood — a bare "true"/an id isn't
+  // worth surfacing, a search query or a named context is.
+  static const _processingActivitySummaryKeys = [
+    'query',
+    'context_name',
+    'state',
+  ];
+
+  void _handleProcessingActivity(Map<String, dynamic> event) {
+    if (event['type'] != 'response.function_call_arguments.done' ||
+        _processingActivityController.isClosed) {
+      return;
+    }
+    final name = event['name'] as String?;
+    if (name == null) return;
+    final args = _decodeArguments(event['arguments']);
+    String? summary;
+    for (final key in _processingActivitySummaryKeys) {
+      final value = args[key];
+      if (value is String && value.isNotEmpty) {
+        summary = value;
+        break;
+      }
+    }
+    _processingActivityController.add(
+      summary != null ? '$name: "$summary"' : name,
+    );
   }
 
   void _handleThinkingState(Map<String, dynamic> event) {

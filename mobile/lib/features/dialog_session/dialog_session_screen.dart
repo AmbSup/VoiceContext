@@ -39,10 +39,12 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
   StreamSubscription<double>? _audioLevelSubscription;
   StreamSubscription<String>? _liveTranscriptSubscription;
   StreamSubscription<bool>? _thinkingSubscription;
+  StreamSubscription<String>? _processingActivitySubscription;
   StreamSubscription<ActiveContext?>? _activeContextSubscription;
   String? _dialogSessionId;
   String? _dialogState;
   String _liveTranscript = '';
+  String _processingActivity = '';
   final List<double> _audioLevels =
       List<double>.filled(_waveformBarCount, 0, growable: true);
   bool _sessionActive = false;
@@ -74,6 +76,10 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
     _thinkingSubscription = _controller.thinking.listen((isThinking) {
       if (mounted) setState(() => _isThinking = isThinking);
     });
+    _processingActivitySubscription =
+        _controller.processingActivity.listen((activity) {
+      if (mounted) setState(() => _processingActivity = activity);
+    });
     _activeContextSubscription =
         _controller.activeContexts.listen((activeContext) {
       if (mounted) setState(() => _activeContext = activeContext);
@@ -101,6 +107,7 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
         _dialogState = null;
         _isThinking = false;
         _liveTranscript = '';
+        _processingActivity = '';
         _audioLevels.setAll(0, List<double>.filled(_waveformBarCount, 0));
         await _controller.startSession();
         try {
@@ -229,6 +236,7 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
     unawaited(_liveTranscriptSubscription?.cancel());
     unawaited(_thinkingSubscription?.cancel());
     unawaited(_activeContextSubscription?.cancel());
+    unawaited(_processingActivitySubscription?.cancel());
     unawaited(_controller.dispose());
     super.dispose();
   }
@@ -297,7 +305,27 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
                     style: Theme.of(context).textTheme.bodyLarge,
                   ),
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 4),
+              ],
+              // Separate from _liveTranscript on purpose: gpt-realtime is
+              // audio-native and never sees the transcript above as input,
+              // it hears the same audio independently — on unclear speech
+              // the two can genuinely disagree. This shows what the model
+              // itself acted on (its own function-call arguments), not
+              // another transcription model's guess at the same audio.
+              if (_sessionActive && _processingActivity.isNotEmpty) ...[
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 320),
+                  child: Text(
+                    'Verarbeitet: $_processingActivity',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.secondary,
+                          fontStyle: FontStyle.italic,
+                        ),
+                  ),
+                ),
+                const SizedBox(height: 12),
               ],
               ElevatedButton.icon(
                 onPressed: _sessionChanging ? null : _toggleSession,
