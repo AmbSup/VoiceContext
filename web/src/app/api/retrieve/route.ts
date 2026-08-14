@@ -3,7 +3,7 @@ import {
   getConfirmedActiveContext,
   resolveContext,
 } from "@/lib/active-context";
-import { hybridRetrieve } from "@/lib/retrieval";
+import { emptyRetrievalUsage, hybridRetrieve } from "@/lib/retrieval";
 import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
 import { corsJson, corsPreflight } from "@/lib/cors";
 
@@ -41,8 +41,6 @@ import { corsJson, corsPreflight } from "@/lib/cors";
 // (api/realtime-token/route.ts) can pass when the user's question makes
 // them unambiguous (e.g. a named Kontext or an explicit time frame).
 
-const MATCH_COUNT = 5; // fewer than web Suche's 8 — this rides the live turn-taking latency budget
-const CONTEXT_MATCH_COUNT = 3;
 const RERANK_TIMEOUT_MS = 2500;
 
 // Basic ISO-date validation for occurred_from/occurred_to: an unparseable
@@ -112,65 +110,73 @@ export async function POST(request: Request) {
 
   const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
 
-  let contextId: string | undefined;
-  let scopedContextName: string | undefined;
-  let isActiveContextScope = false;
-  if (contextName) {
-    const resolution = await resolveContext(
-      supabase,
-      contextSpaceId,
-      contextName,
-    );
-    if (resolution.status === "ambiguous") {
-      // No retrieval attempt at all here — answering from the wrong
-      // Kontext (or an unscoped search) would look plausible but be wrong.
-      // The model gets this back as its function_call_output and should
-      // ask the user to disambiguate (state "nachfragen").
-      return corsJson({
-        items: [],
-        ambiguous_context: {
-          context_name: contextName,
-          candidates: resolution.candidates.map(({ name }) => name),
-        },
-      });
-    }
-    if (resolution.status === "not_found") {
-      return corsJson({
-        items: [],
-        context_not_found: { context_name: contextName },
-      });
-    }
-    contextId = resolution.context.id;
-    scopedContextName = resolution.context.name;
-  } else {
-    // The confirmed preference is server-owned state. Do not trust a client
-    // supplied active_context_id to label an arbitrary context as the user's
-    // confirmed default; explicit one-turn focus already uses context_name.
-    const activeContext = await getConfirmedActiveContext(
-      supabase,
-      contextSpaceId,
-      user.id,
-    );
-    if (activeContext) {
-      contextId = activeContext.id;
-      scopedContextName = activeContext.name;
-      isActiveContextScope = true;
-    }
-  }
   const { from: occurredFromValid, to: occurredToValid } = parseOccurredRange(
     occurredFrom,
     occurredTo,
   );
 
+  // Everything below — including active-context/context_name resolution —
+  // is inside this try block on purpose: a live voice turn is waiting on a
+  // function_call_output no matter what fails here, and the model just
+  // stalls silently if this route throws past Next.js's default handler
+  // instead of returning JSON the client can speak an error from (see
+  // RealtimeDialogController._handleRetrieveMemory's catch).
   try {
+    let contextId: string | undefined;
+    let scopedContextName: string | undefined;
+    let isActiveContextScope = false;
+    if (contextName) {
+      const resolution = await resolveContext(
+        supabase,
+        contextSpaceId,
+        contextName,
+      );
+      if (resolution.status === "ambiguous") {
+        // No retrieval attempt at all here — answering from the wrong
+        // Kontext (or an unscoped search) would look plausible but be
+        // wrong. The model gets this back as its function_call_output and
+        // should ask the user to disambiguate (state "nachfragen").
+        return corsJson({
+          items: [],
+          retrieval_usage: emptyRetrievalUsage(),
+          ambiguous_context: {
+            context_name: contextName,
+            candidates: resolution.candidates.map(({ name }) => name),
+          },
+        });
+      }
+      if (resolution.status === "not_found") {
+        return corsJson({
+          items: [],
+          retrieval_usage: emptyRetrievalUsage(),
+          context_not_found: { context_name: contextName },
+        });
+      }
+      contextId = resolution.context.id;
+      scopedContextName = resolution.context.name;
+    } else {
+      // The confirmed preference is server-owned state. Do not trust a
+      // client supplied active_context_id to label an arbitrary context as
+      // the user's confirmed default; explicit one-turn focus already uses
+      // context_name.
+      const activeContext = await getConfirmedActiveContext(
+        supabase,
+        contextSpaceId,
+        user.id,
+      );
+      if (activeContext) {
+        contextId = activeContext.id;
+        scopedContextName = activeContext.name;
+        isActiveContextScope = true;
+      }
+    }
+
     const retrieve = (filterContextId?: string) =>
       hybridRetrieve({
         supabase,
         query,
         contextSpaceId,
         userId: user.id,
-        matchCount: MATCH_COUNT,
-        contextMatchCount: CONTEXT_MATCH_COUNT,
         filters: {
           types: type ? [type] : undefined,
           contextId: filterContextId,
@@ -182,14 +188,15 @@ export async function POST(request: Request) {
         // allowed to run unbounded on top of the embedding + DB round trips.
         rerank: { mode: "llm", timeoutMs: RERANK_TIMEOUT_MS },
       });
-    let items = await retrieve(contextId);
+    let retrieval = await retrieve(contextId);
     let fellBackToContextSpace = false;
-    if (isActiveContextScope && items.length === 0) {
-      items = await retrieve();
+    if (isActiveContextScope && retrieval.sources.length === 0) {
+      retrieval = await retrieve();
       fellBackToContextSpace = true;
     }
     return corsJson({
-      items,
+      items: retrieval.sources,
+      retrieval_usage: retrieval.usage,
       retrieval_scope: {
         mode: contextId
           ? isActiveContextScope
