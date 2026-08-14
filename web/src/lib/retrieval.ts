@@ -41,15 +41,24 @@ const RERANK_MODEL = "gpt-4.1-mini"; // same model already used for Suche's Answ
 // the roadmap's later "Retrieval-Evaluation" step (30-50 real queries,
 // Precision@5/Recall@5/no-result accuracy). Revisit both once that exists.
 const DEFAULT_MIN_RELEVANCE = 0.35;
-// Lowered from an initial 0.75 after live production evidence: a genuinely
-// correct, stored fact ("Martin Amon lebt in Wiener Neustadt...") failed
-// this floor against the paraphrased query "Wohnort des Nutzers" (zero
-// lexical overlap for `simple`-config FTS, and text-embedding-3-small's
-// cosine similarity for true-but-differently-worded matches routinely lands
-// well under 0.75 — 0.75 is close to near-duplicate wording, not "related").
-// 0.45 still blocks unrelated candidates (typically <0.2 similarity) while
-// no longer vetoing real matches.
-const CONSERVATIVE_VECTOR_THRESHOLD = 0.45;
+// Lowered twice from an initial 0.75 after live production evidence. First
+// pass to 0.45 wasn't low enough either: reproducing the exact query "Wo
+// wohne ich?" against the real production embedding, the genuinely correct
+// stored fact ("Martin Amon lebt in Wiener Neustadt...") scored only 0.363
+// cosine similarity, and the single highest-similarity candidate in the
+// entire 30-item pool was 0.423 — for this embedding model on short German
+// facts, "correct but differently worded" and "merely same-domain" are not
+// reliably separable by an absolute cosine floor at all (fts_rank was 0
+// throughout the whole pool too — `simple` FTS has no stemming, so
+// "wohne"/"Wohnort" never lexically matches "lebt"). This value now exists
+// only as a last-resort net for the rare case reranking itself fails
+// (network error, provider outage) — see RERANK_TIMEOUT_MS in
+// api/retrieve/route.ts, raised so that path is hit far less often. Given
+// the choice between occasional noise reaching the model (bounded by the
+// token budget, and readable in context by the model itself) and silently
+// answering "no information", the latter is strictly worse for this
+// personal, small-corpus use case.
+const CONSERVATIVE_VECTOR_THRESHOLD = 0.3;
 const DEFAULT_MEMORY_CANDIDATE_COUNT = 30;
 const DEFAULT_CONTEXT_CANDIDATE_COUNT = 10;
 export const DEFAULT_RETRIEVAL_TOKEN_BUDGET = 2500;

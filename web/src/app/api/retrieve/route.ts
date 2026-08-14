@@ -41,7 +41,15 @@ import { corsJson, corsPreflight } from "@/lib/cors";
 // (api/realtime-token/route.ts) can pass when the user's question makes
 // them unambiguous (e.g. a named Kontext or an explicit time frame).
 
-const RERANK_TIMEOUT_MS = 2500;
+// Raised from an initial 2500ms after live reproduction: for a real query
+// ("Wo wohne ich?") the correct stored fact scored only 0.363 cosine
+// similarity — nowhere near a literal-overlap FTS hit — so this path
+// depends on reranking actually completing, not falling back. 2500ms was
+// tight enough to occasionally lose that race (serverless cold start,
+// ordinary network jitter) and silently drop the real answer. The client's
+// hard budget is RetrievalClient's 15s HTTP timeout (embedding + 2 RPCs +
+// rerank + margin all fit well inside that even at 5000ms).
+const RERANK_TIMEOUT_MS = 5000;
 
 // Basic ISO-date validation for occurred_from/occurred_to: an unparseable
 // value is dropped (treated as not provided) rather than handed to the RPC,
