@@ -1,0 +1,9 @@
+mobile/
+supabase/
+docs/
+.agents/
+.claude/
+web/node_modules/
+web/.next/
+energy3000.txt
+web/vec_firma.txt

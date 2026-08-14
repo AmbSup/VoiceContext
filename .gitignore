@@ -19,3 +19,5 @@ supabase/.temp/
 # path symlinks into .agents/skills (which IS tracked); regenerate here via
 # `npx skills add supabase/agent-skills` instead of committing the symlinks.
 .claude/
+
+.vercel
