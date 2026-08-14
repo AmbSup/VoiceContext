@@ -2,14 +2,16 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
-import { createChatCompletion, createEmbeddings } from "@/lib/openai";
+import { createChatCompletion } from "@/lib/openai";
+import { hybridRetrieve, type RetrievedContext, type RetrievedMemoryItem } from "@/lib/retrieval";
 
 // Retrieval + Answer Engine (see docs/implementation-plan.md Phase 3).
 // Modus A only ("nur persönlicher Kontext", see ADR 0002) — no internet,
-// no Source Router. Vector similarity comes from match_memory_items and
-// match_contexts (supabase/migrations/0010_match_memory_items.sql,
-// 0011_context_embeddings.sql), both already enforcing RLS since neither
-// is SECURITY DEFINER.
+// no Source Router. Hybrid Retrieval (embeddings + Postgres full-text
+// search, RRF-fused, LLM-reranked, Mindestscore-gefiltert) lives in
+// web/src/lib/retrieval.ts — see supabase/migrations/
+// 0013_hybrid_retrieval.sql for why pure vector search wasn't enough
+// (unreliable for names, exact phrases, dates).
 //
 // Kontext name/description are searched alongside Memory-Items: CONTEXT.md
 // treats a Kontext as "nur" an organizing node, not a knowledge container,
@@ -21,25 +23,11 @@ const ANSWER_MODEL = "gpt-4.1-mini";
 const MATCH_COUNT = 8;
 const CONTEXT_MATCH_COUNT = 3;
 
-export interface MemoryItemSource {
-  kind: "memory_item";
-  id: string;
-  type: string;
-  content: string;
-  status: string;
-  confidence: string | null;
-  occurred_at: string;
-  similarity: number;
+export interface MemoryItemSource extends RetrievedMemoryItem {
   contexts: { id: string; name: string }[];
 }
 
-export interface ContextSource {
-  kind: "context";
-  id: string;
-  name: string;
-  description: string | null;
-  similarity: number;
-}
+export type ContextSource = RetrievedContext;
 
 export type SearchSource = MemoryItemSource | ContextSource;
 
@@ -100,28 +88,21 @@ export async function search(
   const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
 
   try {
-    const [queryEmbedding] = await createEmbeddings([query], user.id);
-
-    const [memoryItemsResult, contextsResult] = await Promise.all([
-      supabase.rpc("match_memory_items", {
-        query_embedding: queryEmbedding,
-        match_context_space_id: contextSpaceId,
-        match_count: MATCH_COUNT,
-      }),
-      supabase.rpc("match_contexts", {
-        query_embedding: queryEmbedding,
-        match_context_space_id: contextSpaceId,
-        match_count: CONTEXT_MATCH_COUNT,
-      }),
-    ]);
-    if (memoryItemsResult.error) throw new Error(memoryItemsResult.error.message);
-    if (contextsResult.error) throw new Error(contextsResult.error.message);
-
-    const memoryItemRows = (memoryItemsResult.data ?? []) as Omit<
-      MemoryItemSource,
-      "kind" | "contexts"
-    >[];
-    const contextRows = (contextsResult.data ?? []) as Omit<ContextSource, "kind">[];
+    const retrieved = await hybridRetrieve({
+      supabase,
+      query,
+      contextSpaceId,
+      userId: user.id,
+      matchCount: MATCH_COUNT,
+      contextMatchCount: CONTEXT_MATCH_COUNT,
+      // No hard latency budget here (unlike the live voice path), so a
+      // plain, untimed LLM rerank pass is fine.
+      rerank: { mode: "llm" },
+    });
+    const memoryItemRows = retrieved.filter(
+      (s): s is RetrievedMemoryItem => s.kind === "memory_item",
+    );
+    const contextRows = retrieved.filter((s): s is ContextSource => s.kind === "context");
 
     if (memoryItemRows.length === 0 && contextRows.length === 0) {
       return {
@@ -152,13 +133,9 @@ export async function search(
 
     const sources: SearchSource[] = [
       ...memoryItemRows.map(
-        (row): MemoryItemSource => ({
-          ...row,
-          kind: "memory_item",
-          contexts: contextsByItem.get(row.id) ?? [],
-        }),
+        (row): MemoryItemSource => ({ ...row, contexts: contextsByItem.get(row.id) ?? [] }),
       ),
-      ...contextRows.map((row): ContextSource => ({ ...row, kind: "context" })),
+      ...contextRows,
     ];
 
     const answer = await createChatCompletion({

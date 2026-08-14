@@ -53,6 +53,11 @@ export async function createChatCompletion(params: {
   // Segmentation/Extraction/Classification pipeline).
   responseSchema?: { name: string; schema: object };
   safetyIdentifier: string;
+  // Lets a caller actually cancel the request (not just stop waiting on it)
+  // — used by web/src/lib/retrieval.ts's time-boxed reranker, where a
+  // discarded-but-still-running request would keep burning OpenAI spend in
+  // the background for no reason.
+  signal?: AbortSignal;
 }): Promise<string> {
   const { apiKey, baseUrl } = openaiConfig();
 
@@ -63,6 +68,7 @@ export async function createChatCompletion(params: {
       "Content-Type": "application/json",
       "OpenAI-Safety-Identifier": params.safetyIdentifier,
     },
+    signal: params.signal,
     body: JSON.stringify({
       model: params.model,
       messages: params.messages,

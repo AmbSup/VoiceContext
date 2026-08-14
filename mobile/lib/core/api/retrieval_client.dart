@@ -22,20 +22,51 @@ class RetrievalClient {
 
   final String _backendBaseUrl;
 
-  Future<List<Map<String, dynamic>>> retrieve(String query) async {
+  // Both function tools ride the live turn-taking latency budget — the user
+  // is waiting mid-conversation. Without a bound, a stalled OpenAI-embedding
+  // call or Supabase query on the backend leaves this await pending forever,
+  // so the existing error handling in RealtimeDialogController (which reports
+  // failures back to the model so it can say something) never triggers.
+  static const _requestTimeout = Duration(seconds: 15);
+
+  /// context_name/memory_type/occurred_from/occurred_to are optional
+  /// Metadatenfilter (see the retrieve_memory function tool's parameters in
+  /// web/src/app/api/realtime-token/route.ts) — only forwarded when set, so
+  /// the backend's hybrid retrieval falls back to its unfiltered default.
+  ///
+  /// Returns the full decoded response body, not just `items` — an
+  /// ambiguous context_name comes back as `{'items': [], 'ambiguous_context':
+  /// {...}}` (see api/retrieve/route.ts), and callers need that field to
+  /// pass the ambiguity back to the model instead of it being silently
+  /// dropped here.
+  Future<Map<String, dynamic>> retrieve(
+    String query, {
+    String? contextName,
+    String? memoryType,
+    String? occurredFrom,
+    String? occurredTo,
+  }) async {
     final session = Supabase.instance.client.auth.currentSession;
     if (session == null) {
       throw StateError('No Supabase session — user must be logged in.');
     }
 
-    final response = await http.post(
-      Uri.parse('$_backendBaseUrl/api/retrieve'),
-      headers: {
-        'Authorization': 'Bearer ${session.accessToken}',
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode({'query': query}),
-    );
+    final response = await http
+        .post(
+          Uri.parse('$_backendBaseUrl/api/retrieve'),
+          headers: {
+            'Authorization': 'Bearer ${session.accessToken}',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({
+            'query': query,
+            if (contextName != null) 'context_name': contextName,
+            if (memoryType != null) 'type': memoryType,
+            if (occurredFrom != null) 'occurred_from': occurredFrom,
+            if (occurredTo != null) 'occurred_to': occurredTo,
+          }),
+        )
+        .timeout(_requestTimeout);
 
     if (response.statusCode != 200) {
       throw HttpException(
@@ -43,9 +74,7 @@ class RetrievalClient {
       );
     }
 
-    final body = jsonDecode(response.body) as Map<String, dynamic>;
-    final items = body['items'] as List<dynamic>? ?? const <dynamic>[];
-    return items.cast<Map<String, dynamic>>();
+    return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
   /// Structured listing for the list_context_items function tool — the
@@ -58,14 +87,16 @@ class RetrievalClient {
       throw StateError('No Supabase session — user must be logged in.');
     }
 
-    final response = await http.post(
-      Uri.parse('$_backendBaseUrl/api/list-context-items'),
-      headers: {
-        'Authorization': 'Bearer ${session.accessToken}',
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode({'context_name': contextName}),
-    );
+    final response = await http
+        .post(
+          Uri.parse('$_backendBaseUrl/api/list-context-items'),
+          headers: {
+            'Authorization': 'Bearer ${session.accessToken}',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({'context_name': contextName}),
+        )
+        .timeout(_requestTimeout);
 
     if (response.statusCode != 200) {
       throw HttpException(
@@ -75,5 +106,32 @@ class RetrievalClient {
     }
 
     return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
+  Future<String> searchWeb(String query) async {
+    final session = Supabase.instance.client.auth.currentSession;
+    if (session == null) {
+      throw StateError('No Supabase session — user must be logged in.');
+    }
+
+    final response = await http
+        .post(
+          Uri.parse('$_backendBaseUrl/api/web-search'),
+          headers: {
+            'Authorization': 'Bearer ${session.accessToken}',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({'query': query}),
+        )
+        .timeout(_requestTimeout);
+
+    if (response.statusCode != 200) {
+      throw HttpException(
+        'Websuche fehlgeschlagen (${response.statusCode}): ${response.body}',
+      );
+    }
+
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    return body['answer'] as String? ?? '';
   }
 }
