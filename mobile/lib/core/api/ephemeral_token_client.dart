@@ -32,7 +32,13 @@ class EphemeralTokenClient {
 
   final String _backendBaseUrl;
 
-  Future<RealtimeToken> fetchEphemeralToken() async {
+  /// [enabledSourceIds] comes from the Turn-Kontext-Auswahl screen (see
+  /// ContextSelectionScreen) — the context-sources ids the user left toggled
+  /// on before starting this session. Omit it (or pass null) to let the
+  /// backend fall back to its own default source scope.
+  Future<RealtimeToken> fetchEphemeralToken({
+    List<String>? enabledSourceIds,
+  }) async {
     final session = Supabase.instance.client.auth.currentSession;
     if (session == null) {
       throw StateError('No Supabase session — user must be logged in.');
@@ -40,7 +46,13 @@ class EphemeralTokenClient {
 
     final response = await http.post(
       Uri.parse('$_backendBaseUrl/api/realtime-token'),
-      headers: {'Authorization': 'Bearer ${session.accessToken}'},
+      headers: {
+        'Authorization': 'Bearer ${session.accessToken}',
+        if (enabledSourceIds != null) 'Content-Type': 'application/json',
+      },
+      body: enabledSourceIds != null
+          ? jsonEncode({'enabledSourceIds': enabledSourceIds})
+          : null,
     );
 
     if (response.statusCode != 200) {

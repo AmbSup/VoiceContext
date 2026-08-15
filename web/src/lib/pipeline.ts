@@ -97,6 +97,12 @@ interface ExtractedMemoryItem {
   content: string;
   confidence: ConfidenceLevel;
   context_links: ExtractedContextLink[];
+  // True only for an explicit Merk-/Aufgaben-Anweisung ("merk dir das",
+  // "das ist ein offener Punkt") — independent of `confidence`, which is
+  // about extraction certainty, not provenance. Powers the Ergebnisse
+  // screen's distinction between user-directed and passively-extracted
+  // items (mobile/lib/features/dialog_results).
+  user_directed: boolean;
 }
 
 interface ExtractedSegment {
@@ -140,8 +146,15 @@ const RESPONSE_SCHEMA = {
                     required: ["context_id", "confidence"],
                   },
                 },
+                user_directed: { type: "boolean" },
               },
-              required: ["type", "content", "confidence", "context_links"],
+              required: [
+                "type",
+                "content",
+                "confidence",
+                "context_links",
+                "user_directed",
+              ],
             },
           },
         },
@@ -228,6 +241,7 @@ Regeln:
 - Segmentiere nach Thema, nicht nach Absatz oder Zeit.
 - Erzeuge nur Memory-Items mit echtem Wissenswert (Fakt, Entscheidung, Aufgabe, Idee, Annahme, offene Frage, Ziel, Risiko, Person, Termin, Ergebnis, Erkenntnis). Ignoriere Small Talk und Rauschen.
 - confidence beschreibt deine Sicherheit bei Inhalt und Typ des Items.
+- user_directed=true setzt du AUSSCHLIESSLICH bei einer ausdrücklichen Merk-/Aufgaben-Anweisung des Nutzers (z. B. "merk dir das", "notier das als offenen Punkt", "das ist eine Aufgabe für mich", "schick mir das"). Sonst immer false — auch wenn du dir beim Inhalt sehr sicher bist. Das ist unabhängig von confidence: confidence bewertet, wie sicher du beim Inhalt/Typ bist, user_directed bewertet nur, ob der Nutzer selbst ausdrücklich dazu aufgefordert hat.
 - Kontext-Zuordnung: Schlage einen Eintrag in context_links nur vor, wenn du dir sicher bist, welchem bestehenden Kontext (aus "Bestehende Kontexte") das Item zuzuordnen ist. Gib pro Vorschlag eine eigene confidence an. Im Zweifel: keinen Eintrag hinzufügen (das Item bleibt dann unzugeordnet = Inbox) — rate nicht.
 - Keine leeren Segmente, keine inhaltsleeren Memory-Items.`;
 }
@@ -277,7 +291,8 @@ function isValidExtractionResult(value: unknown): value is ExtractionResult {
         typeof candidate.type === "string" &&
         typeof candidate.content === "string" &&
         typeof candidate.confidence === "string" &&
-        Array.isArray(candidate.context_links)
+        Array.isArray(candidate.context_links) &&
+        typeof candidate.user_directed === "boolean"
       );
     });
   });
@@ -483,6 +498,7 @@ export async function runSegmentationPipeline({
           content: item.content,
           confidence: item.confidence,
           created_by: createdBy,
+          user_directed: item.user_directed,
         })
         .select("id")
         .single();

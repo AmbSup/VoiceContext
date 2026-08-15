@@ -10,6 +10,8 @@ import '../../core/api/dialog_processing_client.dart';
 import '../../core/data/context_summary_repository.dart';
 import '../../core/data/dialog_session_repository.dart';
 import '../../core/realtime/realtime_dialog_controller.dart';
+import '../context_selection/context_selection_screen.dart';
+import '../dialog_results/dialog_results_screen.dart';
 
 /// Button-triggered live voice session (see CONTEXT.md: "Dialog-Session").
 /// No wake word — everything said while a session is active is directed
@@ -162,14 +164,39 @@ class _DialogSessionScreenState extends State<DialogSessionScreen> {
           );
           unawaited(_triggerProcessing(sessionId));
           unawaited(_logEvents(sessionId, eventLog));
+          // Not awaited: the results screen polls processing_status itself
+          // (see DialogResultsScreen), so opening it must not block this
+          // method's finally block from resetting _sessionChanging/
+          // _sessionActive right away.
+          if (mounted) {
+            unawaited(
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) =>
+                      DialogResultsScreen(dialogSessionId: sessionId),
+                ),
+              ),
+            );
+          }
         }
       } else {
+        // Turn-Kontext-Auswahl: lets the user scope which context sources
+        // this session's Realtime instructions include before it starts.
+        // Cancelling (back navigation, popping with null) aborts the start
+        // entirely — the finally block below still resets _sessionChanging.
+        final enabledSourceIds = await Navigator.push<List<String>>(
+          context,
+          MaterialPageRoute(builder: (_) => const ContextSelectionScreen()),
+        );
+        if (!mounted || enabledSourceIds == null) return;
+
         _dialogState = null;
         _isThinking = false;
         _liveTranscript = '';
         _processingActivity = '';
         _audioLevels.setAll(0, List<double>.filled(_waveformBarCount, 0));
-        await _controller.startSession();
+        await _controller.startSession(enabledSourceIds: enabledSourceIds);
         // Keeps the screen on for the whole live session — without this,
         // Android's screen timeout dims/locks the screen mid-session,
         // which (per user report) can visibly interrupt or drop the

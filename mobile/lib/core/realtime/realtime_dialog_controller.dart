@@ -177,7 +177,10 @@ class RealtimeDialogController {
   /// the caller explicitly persists it after the session ends.
   List<Map<String, dynamic>> get eventLog => List.unmodifiable(_eventLog);
 
-  Future<void> startSession() async {
+  /// [enabledSourceIds] comes from the Turn-Kontext-Auswahl screen — the
+  /// context-sources ids the user left toggled on. Pass null to let the
+  /// backend fall back to its own default source scope.
+  Future<void> startSession({List<String>? enabledSourceIds}) async {
     _ensureNotDisposed();
     if (_state != RealtimeConnectionState.idle) {
       throw StateError('A Realtime Dialog-Session is already active.');
@@ -192,7 +195,9 @@ class RealtimeDialogController {
     _setState(RealtimeConnectionState.connecting);
 
     try {
-      final realtimeToken = await _tokenClient.fetchEphemeralToken();
+      final realtimeToken = await _tokenClient.fetchEphemeralToken(
+        enabledSourceIds: enabledSourceIds,
+      );
       _setActiveContext(realtimeToken.activeContext);
       _pendingActiveContext = null;
       _pendingActiveContextHasUserReply = false;

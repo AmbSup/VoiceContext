@@ -16,7 +16,7 @@ export interface SessionMemoryNote {
   next_steps: string[];
 }
 
-interface RecentSessionRow {
+export interface RecentSessionRow {
   id: string;
   started_context_id: string | null;
   ended_at: string;
@@ -28,7 +28,7 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
-function isSessionMemoryNote(value: unknown): value is SessionMemoryNote {
+export function isSessionMemoryNote(value: unknown): value is SessionMemoryNote {
   if (!value || typeof value !== "object") return false;
   const note = value as Partial<SessionMemoryNote>;
   return (
@@ -109,7 +109,7 @@ function lastRawTurns(transcript: string | null): string {
   return truncateToTokens(turns, 600, "end");
 }
 
-function renderSessionBlock(session: RecentSessionRow): string {
+export function renderSessionBlock(session: RecentSessionRow): string {
   const parts = [`### Session vom ${new Date(session.ended_at).toLocaleString("de-DE")}`];
   if (isSessionMemoryNote(session.short_term_memory)) {
     parts.push(`Übergabe-Notiz:\n${JSON.stringify(session.short_term_memory)}`);
