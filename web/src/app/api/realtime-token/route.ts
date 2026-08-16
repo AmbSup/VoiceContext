@@ -2,6 +2,7 @@ import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { corsJson, corsPreflight } from "@/lib/cors";
 import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
 import { buildRealtimeInstructions } from "@/lib/realtime-instructions";
+import { logPerf, PerfTimer } from "@/lib/perf-log";
 
 // Mints a short-lived OpenAI Realtime API token for the mobile app's next
 // Dialog-Session (see ADR 0001, docs/implementation-plan.md Phase 2). The
@@ -245,6 +246,7 @@ export async function OPTIONS() {
 }
 
 export async function POST(request: Request) {
+  const timer = new PerfTimer();
   const accessToken = request.headers
     .get("authorization")
     ?.replace(/^Bearer\s+/i, "");
@@ -266,8 +268,10 @@ export async function POST(request: Request) {
   if (authError || !user) {
     return corsJson({ error: "Not authenticated" }, { status: 401 });
   }
+  timer.mark("auth");
 
   const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
+  timer.mark("context_space");
 
   // Turn-Kontext-Auswahl (mobile): the client optionally sends which
   // sources it enabled before starting this session. No/invalid body falls
@@ -290,6 +294,7 @@ export async function POST(request: Request) {
     userId: user.id,
     enabledSourceIds: requestedSourceIds,
   });
+  timer.mark("build_instructions");
 
   const apiKey = process.env.OPENAI_API_KEY;
   const baseUrl = process.env.OPENAI_API_BASE_URL ?? "https://api.openai.com";
@@ -318,6 +323,10 @@ export async function POST(request: Request) {
         audio: {
           input: {
             format: { type: "audio/pcm", rate: 24000 },
+            // The phone is commonly used in a car or room where the speaker
+            // is not directly on the microphone. Realtime noise reduction is
+            // applied before VAD and reduces short background-noise turns.
+            noise_reduction: { type: "far_field" },
             // Was semantic_vad (scores whether the user actually sounds
             // done talking, so it's less prone to firing on background
             // noise — engine, wind, the car use case from CONTEXT.md — than
@@ -333,7 +342,9 @@ export async function POST(request: Request) {
             // Revisit if OpenAI fixes semantic_vad's reliability.
             turn_detection: {
               type: "server_vad",
-              threshold: 0.5,
+              // 0.5 produced several 600-700 ms turns with empty transcripts
+              // in a real mobile session. Require a clearer speech signal.
+              threshold: 0.65,
               prefix_padding_ms: 300,
               silence_duration_ms: 600,
               create_response: true,
@@ -372,8 +383,11 @@ export async function POST(request: Request) {
     }),
   });
 
+  timer.mark("openai_mint");
+
   if (!openaiResponse.ok) {
     const detail = await openaiResponse.text();
+    await logPerf(supabase, { route: "/api/realtime-token", timer, contextSpaceId });
     return corsJson(
       { error: "Failed to mint Realtime token", detail },
       { status: 502 },
@@ -381,6 +395,7 @@ export async function POST(request: Request) {
   }
 
   const { value, expires_at } = await openaiResponse.json();
+  await logPerf(supabase, { route: "/api/realtime-token", timer, contextSpaceId });
   return corsJson({
     token: value,
     expiresAt: expires_at,

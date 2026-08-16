@@ -2,6 +2,7 @@ import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { corsJson, corsPreflight } from "@/lib/cors";
 import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
 import { buildRealtimeInstructions } from "@/lib/realtime-instructions";
+import { logPerf, PerfTimer } from "@/lib/perf-log";
 
 // Powers the live mid-session context update: the mobile app can't build
 // instructions text itself (GET /api/context-sources deliberately omits
@@ -16,6 +17,7 @@ export async function OPTIONS() {
 }
 
 export async function POST(request: Request) {
+  const timer = new PerfTimer();
   const accessToken = request.headers
     .get("authorization")
     ?.replace(/^Bearer\s+/i, "");
@@ -35,6 +37,7 @@ export async function POST(request: Request) {
   if (authError || !user) {
     return corsJson({ error: "Not authenticated" }, { status: 401 });
   }
+  timer.mark("auth");
 
   let requestedSourceIds: string[] | undefined;
   try {
@@ -48,12 +51,19 @@ export async function POST(request: Request) {
   }
 
   const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
+  timer.mark("context_space");
   const { instructions } = await buildRealtimeInstructions({
     supabase,
     contextSpaceId,
     userId: user.id,
     enabledSourceIds: requestedSourceIds,
   });
+  timer.mark("build_instructions");
 
+  await logPerf(supabase, {
+    route: "/api/context-sources/instructions",
+    timer,
+    contextSpaceId,
+  });
   return corsJson({ instructions });
 }

@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createChatCompletion, createEmbeddings } from "@/lib/openai";
 import { countTokens } from "@/lib/token-count";
+import type { PerfTimer } from "@/lib/perf-log";
 
 // Hybrid Retrieval — shared by web/src/app/search/actions.ts (web Suche) and
 // web/src/app/api/retrieve/route.ts (mobile's live retrieve_memory tool).
@@ -391,6 +392,10 @@ export async function hybridRetrieve(params: {
   minScore?: number;
   filters?: RetrievalFilters;
   rerank?: RerankMode;
+  // Optional: lets a caller on the live-dialog latency path (see
+  // api/retrieve/route.ts) break total_ms down by phase without this
+  // module depending on where/whether the caller logs it.
+  timer?: PerfTimer;
 }): Promise<RetrievalResult> {
   const {
     supabase,
@@ -404,6 +409,7 @@ export async function hybridRetrieve(params: {
     minScore = DEFAULT_MIN_RELEVANCE,
     filters,
     rerank = { mode: "llm" },
+    timer,
   } = params;
   const query = params.query.slice(0, MAX_QUERY_LENGTH);
 
@@ -416,6 +422,7 @@ export async function hybridRetrieve(params: {
   } catch {
     queryEmbedding = null;
   }
+  timer?.mark("embedding");
 
   // Memory-type and occurred-at filters have no honest equivalent on a
   // multi-topic passage. In that case only atomic Memory-Items participate;
@@ -468,6 +475,7 @@ export async function hybridRetrieve(params: {
   if (documentChunksResult.error) {
     throw new Error(documentChunksResult.error.message);
   }
+  timer?.mark("rpc_candidates");
 
   const memoryItemRows = (memoryItemsResult.data ??
     []) as MemoryItemCandidateRow[];
@@ -487,6 +495,7 @@ export async function hybridRetrieve(params: {
   ];
 
   if (candidates.length === 0) {
+    timer?.mark("rerank");
     return { sources: [], usage: emptyRetrievalUsage(tokenBudget) };
   }
 
@@ -506,6 +515,7 @@ export async function hybridRetrieve(params: {
       relevanceById = null;
     }
   }
+  timer?.mark("rerank");
 
   const scored = candidates.map((c): RetrievedSource => {
     const relevance_score = relevanceById?.get(c.id) ?? c.fused_score;

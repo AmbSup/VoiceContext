@@ -6,6 +6,7 @@ import {
 import { emptyRetrievalUsage, hybridRetrieve } from "@/lib/retrieval";
 import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
 import { corsJson, corsPreflight } from "@/lib/cors";
+import { logPerf, PerfTimer } from "@/lib/perf-log";
 
 // Live-targeted Retrieval for the Realtime dialog's "Antworten" state (see
 // docs/implementation-plan.md Phase 2 step 3 / Phase 3). Called by the
@@ -79,6 +80,7 @@ export async function OPTIONS() {
 }
 
 export async function POST(request: Request) {
+  const timer = new PerfTimer();
   const accessToken = request.headers
     .get("authorization")
     ?.replace(/^Bearer\s+/i, "");
@@ -100,6 +102,7 @@ export async function POST(request: Request) {
   if (authError || !user) {
     return corsJson({ error: "Not authenticated" }, { status: 401 });
   }
+  timer.mark("auth");
 
   let query: string | undefined;
   let type: string | undefined;
@@ -123,6 +126,7 @@ export async function POST(request: Request) {
   }
 
   const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
+  timer.mark("context_space");
 
   const { from: occurredFromValid, to: occurredToValid } = parseOccurredRange(
     occurredFrom,
@@ -150,6 +154,7 @@ export async function POST(request: Request) {
         // Kontext (or an unscoped search) would look plausible but be
         // wrong. The model gets this back as its function_call_output and
         // should ask the user to disambiguate (state "nachfragen").
+        await logPerf(supabase, { route: "/api/retrieve", timer, contextSpaceId });
         return corsJson({
           items: [],
           retrieval_usage: emptyRetrievalUsage(),
@@ -160,6 +165,7 @@ export async function POST(request: Request) {
         });
       }
       if (resolution.status === "not_found") {
+        await logPerf(supabase, { route: "/api/retrieve", timer, contextSpaceId });
         return corsJson({
           items: [],
           retrieval_usage: emptyRetrievalUsage(),
@@ -185,7 +191,7 @@ export async function POST(request: Request) {
       }
     }
 
-    const retrieve = (filterContextId?: string) =>
+    const retrieve = (filterContextId?: string, useTimer?: PerfTimer) =>
       hybridRetrieve({
         supabase,
         query,
@@ -201,16 +207,26 @@ export async function POST(request: Request) {
         // RetrievalClient's 15s HTTP timeout, so a reranker here must not be
         // allowed to run unbounded on top of the embedding + DB round trips.
         rerank: { mode: "llm", timeoutMs: RERANK_TIMEOUT_MS },
+        timer: useTimer,
       });
-    let retrieval = await retrieve(contextId);
+    // Timer only passed on the first attempt — hybridRetrieve's phase marks
+    // (embedding/rpc_candidates/rerank) would otherwise overwrite themselves
+    // on a fallback retry. total_ms still covers both attempts either way.
+    let retrieval = await retrieve(contextId, timer);
     let fellBackToContextSpace = false;
     // Falls back for both scope kinds now — an explicit context_name is
     // still tried first (respects a real user-stated focus), but an empty
     // result there no longer dead-ends the turn; see the comment above.
     if (contextId && retrieval.sources.length === 0) {
       retrieval = await retrieve();
+      timer.mark("fallback_retrieve");
       fellBackToContextSpace = true;
     }
+    await logPerf(supabase, {
+      route: "/api/retrieve",
+      timer,
+      contextSpaceId,
+    });
     return corsJson({
       items: retrieval.sources,
       retrieval_usage: retrieval.usage,
@@ -226,6 +242,7 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
+    await logPerf(supabase, { route: "/api/retrieve", timer, contextSpaceId });
     return corsJson(
       { error: error instanceof Error ? error.message : String(error) },
       { status: 500 },
