@@ -37,6 +37,11 @@ import type { PerfTimer } from "@/lib/perf-log";
 // even if reranking scored it above DEFAULT_MIN_RELEVANCE.
 
 const RERANK_MODEL = "gpt-4.1-mini"; // same model already used for Suche's Answer Engine
+// "before" half of a before/after comparison against Fast mode (see
+// web/src/app/api/web-search/route.ts's WEB_SEARCH_SERVICE_TIER for the
+// same idea applied there) — off for now so /performance collects a
+// Default-tier baseline for the rerank phase first.
+const RERANK_SERVICE_TIER: string | undefined = undefined;
 // Experimental starting values, not yet calibrated against real data — see
 // the roadmap's later "Retrieval-Evaluation" step (30-50 real queries,
 // Precision@5/Recall@5/no-result accuracy). Revisit both once that exists.
@@ -274,6 +279,7 @@ async function rerankCandidates(
       model: RERANK_MODEL,
       safetyIdentifier: userId,
       signal: controller.signal,
+      serviceTier: RERANK_SERVICE_TIER,
       messages: [
         { role: "system", content: buildRerankSystemPrompt() },
         { role: "user", content: buildRerankUserPrompt(query, candidates) },

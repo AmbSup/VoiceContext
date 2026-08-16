@@ -1,12 +1,14 @@
-export const REALTIME_MODEL = "gpt-realtime";
+export const REALTIME_MODEL = "gpt-realtime-2.1";
 
-// Official OpenAI prices for gpt-realtime, in USD per 1M tokens.
-// Source checked 2026-08-14:
-// https://developers.openai.com/api/docs/models/gpt-realtime
+// Official OpenAI prices for gpt-realtime-2.1, in USD per 1M tokens.
+// Source checked 2026-08-16:
+// https://developers.openai.com/api/docs/models/gpt-realtime-2.1
+// Audio pricing is unchanged from the prior "gpt-realtime" model; only
+// textOutput went up ($24 vs $16) — a small share of a voice app's tokens.
 const PRICE_PER_MILLION = {
   textInput: 4,
   cachedInput: 0.4,
-  textOutput: 16,
+  textOutput: 24,
   audioInput: 32,
   audioOutput: 64,
 } as const;

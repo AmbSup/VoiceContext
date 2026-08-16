@@ -75,4 +75,36 @@ class DialogSessionRepository {
     ];
     await _client.from('dialog_session_events').insert(rows);
   }
+
+  /// Persists RealtimeDialogController.voiceTurnLatenciesMs — the
+  /// speech-stopped-to-first-audio-byte latency the user actually feels,
+  /// which never touches our backend (audio flows client<->OpenAI directly
+  /// over WebRTC) and so is invisible to the performance_logs rows the
+  /// Next.js API routes write themselves. Reuses that same table (route:
+  /// "voice_turn_latency") so both halves of the live-dialog latency story
+  /// show up together.
+  Future<void> logVoiceTurnLatencies(
+    String dialogSessionId,
+    List<int> latenciesMs,
+  ) async {
+    if (latenciesMs.isEmpty) return;
+
+    final session = await _client
+        .from('dialog_sessions')
+        .select('context_space_id')
+        .eq('id', dialogSessionId)
+        .single();
+    final contextSpaceId = session['context_space_id'] as String;
+
+    final rows = [
+      for (final ms in latenciesMs)
+        {
+          'context_space_id': contextSpaceId,
+          'dialog_session_id': dialogSessionId,
+          'route': 'voice_turn_latency',
+          'total_ms': ms,
+        },
+    ];
+    await _client.from('performance_logs').insert(rows);
+  }
 }

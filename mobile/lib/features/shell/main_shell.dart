@@ -161,6 +161,7 @@ class _MainShellState extends State<MainShell> {
     unawaited(WakelockPlus.disable());
     final transcript = _controller.transcript;
     final eventLog = _controller.eventLog;
+    final voiceTurnLatenciesMs = _controller.voiceTurnLatenciesMs;
     await _controller.endSession();
     final sessionId = _dialogSessionId;
     _dialogSessionId = null;
@@ -172,6 +173,7 @@ class _MainShellState extends State<MainShell> {
         );
         unawaited(_triggerProcessing(sessionId));
         unawaited(_logEvents(sessionId, eventLog));
+        unawaited(_logVoiceLatencies(sessionId, voiceTurnLatenciesMs));
       } catch (error) {
         debugPrint(
           'Persistieren nach Verbindungsverlust fehlgeschlagen für '
@@ -203,6 +205,7 @@ class _MainShellState extends State<MainShell> {
         unawaited(WakelockPlus.disable());
         final transcript = _controller.transcript;
         final eventLog = _controller.eventLog;
+        final voiceTurnLatenciesMs = _controller.voiceTurnLatenciesMs;
         await _controller.endSession();
         final sessionId = _dialogSessionId;
         _dialogSessionId = null;
@@ -213,6 +216,7 @@ class _MainShellState extends State<MainShell> {
           );
           unawaited(_triggerProcessing(sessionId));
           unawaited(_logEvents(sessionId, eventLog));
+          unawaited(_logVoiceLatencies(sessionId, voiceTurnLatenciesMs));
           setState(() {
             _lastEndedSessionId = sessionId;
             _selectedTabIndex = 2;
@@ -276,6 +280,24 @@ class _MainShellState extends State<MainShell> {
     } catch (error) {
       debugPrint(
         'Event-Protokoll fehlgeschlagen für Session $dialogSessionId: $error',
+      );
+    }
+  }
+
+  /// Fire-and-forget, silent on failure — same rationale as [_logEvents].
+  Future<void> _logVoiceLatencies(
+    String dialogSessionId,
+    List<int> voiceTurnLatenciesMs,
+  ) async {
+    try {
+      await _sessionRepository.logVoiceTurnLatencies(
+        dialogSessionId,
+        voiceTurnLatenciesMs,
+      );
+    } catch (error) {
+      debugPrint(
+        'Sprach-Antwortzeit-Protokoll fehlgeschlagen für Session '
+        '$dialogSessionId: $error',
       );
     }
   }

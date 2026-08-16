@@ -58,6 +58,12 @@ export async function createChatCompletion(params: {
   // discarded-but-still-running request would keep burning OpenAI spend in
   // the background for no reason.
   signal?: AbortSignal;
+  // Opt-in per call, e.g. "fast" (formerly "priority") — up to 2.5x lower
+  // latency at 2x the token price (see openai.com/api-fast-mode). Left
+  // unset for background/non-latency-sensitive callers (extraction,
+  // session notes, suggestions); only worth it for calls actually on the
+  // live-dialog latency path.
+  serviceTier?: string;
 }): Promise<string> {
   const { apiKey, baseUrl } = openaiConfig();
 
@@ -72,6 +78,7 @@ export async function createChatCompletion(params: {
     body: JSON.stringify({
       model: params.model,
       messages: params.messages,
+      ...(params.serviceTier ? { service_tier: params.serviceTier } : {}),
       ...(params.responseSchema
         ? {
             response_format: {

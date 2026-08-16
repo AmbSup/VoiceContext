@@ -17,7 +17,11 @@ import { logPerf, PerfTimer } from "@/lib/perf-log";
 // OpenAI reference: POST /v1/realtime/client_secrets
 // https://developers.openai.com/api/docs/api-reference/realtime-sessions/create-realtime-client-secret
 
-const REALTIME_MODEL = "gpt-realtime";
+// Upgraded from "gpt-realtime" (2026-08-16): same audio-token pricing,
+// GPT-5-class reasoning, 128K context (up from 32K), and ~25% lower p95
+// latency per OpenAI — see web/src/lib/realtime-usage.ts for the price
+// table this was compared against before switching.
+const REALTIME_MODEL = "gpt-realtime-2.1";
 const TOKEN_LIFETIME_SECONDS = 600;
 
 // The three Dialogzustaende from CONTEXT.md ("Dialogzustand"), driven by

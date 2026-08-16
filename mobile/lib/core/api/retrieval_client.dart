@@ -28,6 +28,7 @@ class RetrievalClient {
   // so the existing error handling in RealtimeDialogController (which reports
   // failures back to the model so it can say something) never triggers.
   static const _requestTimeout = Duration(seconds: 15);
+  static const _webSearchTimeout = Duration(seconds: 12);
 
   /// context_name/memory_type/occurred_from/occurred_to are optional
   /// Metadatenfilter (see the retrieve_memory function tool's parameters in
@@ -123,7 +124,7 @@ class RetrievalClient {
           },
           body: jsonEncode({'query': query}),
         )
-        .timeout(_requestTimeout);
+        .timeout(_webSearchTimeout);
 
     if (response.statusCode != 200) {
       throw HttpException(

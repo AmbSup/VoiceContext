@@ -56,6 +56,9 @@ const _offerHelpInstructions =
     'Sag jetzt ausschlieÃŸlich: "Wie kann ich dir helfen?" Keine '
     'Funktionsaufrufe und nichts anderes.';
 const _listeningTurnsBeforeHelpOffer = 3;
+const _webToolNames = {'search_web', 'search_context_and_web'};
+const _maxRealtimeRateLimitRetries = 3;
+const _rateLimitRetrySafetyBuffer = Duration(milliseconds: 250);
 
 // Event types that carry raw audio bytes (base64) rather than just
 // metadata/text — excluded from [RealtimeDialogController.eventLog]. Text
@@ -112,10 +115,15 @@ class RealtimeDialogController {
   MediaStream? _remoteStream;
   Completer<void>? _dataChannelOpened;
   Timer? _audioLevelTimer;
+  Timer? _rateLimitRetryTimer;
   RealtimeConnectionState _state = RealtimeConnectionState.idle;
   bool _disposed = false;
   bool _awaitingFillerTurn = false;
+  bool _fillerSpokenForNextToolCall = false;
   bool _isThinking = false;
+  int _realtimeRateLimitRetryAttempts = 0;
+  Map<String, dynamic>? _lastResponseCreateEvent;
+  Map<String, dynamic>? _deferredWebToolResponse;
   int _consecutiveListeningTurns = 0;
   ActiveContext? _activeContext;
   ActiveContext? _pendingActiveContext;
@@ -125,6 +133,8 @@ class RealtimeDialogController {
   final _liveTranscriptBuffer = StringBuffer();
   final _eventLog = <Map<String, dynamic>>[];
   String? _dialogSessionId;
+  DateTime? _pendingTurnSpeechStoppedAt;
+  final _voiceTurnLatenciesMs = <int>[];
 
   Stream<Map<String, dynamic>> get events => _eventController.stream;
   Stream<RealtimeConnectionState> get states => _stateController.stream;
@@ -190,6 +200,16 @@ class RealtimeDialogController {
   /// the caller explicitly persists it after the session ends.
   List<Map<String, dynamic>> get eventLog => List.unmodifiable(_eventLog);
 
+  /// Milliseconds between each `input_audio_buffer.speech_stopped` and the
+  /// first audio byte of whatever response follows it (a filler turn counts
+  /// — see the deferred-web-tool-filler logic below, which exists precisely
+  /// to make that first response come back fast). This is the only latency
+  /// number that reflects what the user actually experiences; the backend
+  /// route timings in performance_logs cover a different part of the
+  /// pipeline (token minting, retrieval) and never see this leg at all,
+  /// since audio flows client<->OpenAI directly over WebRTC.
+  List<int> get voiceTurnLatenciesMs => List.unmodifiable(_voiceTurnLatenciesMs);
+
   /// [enabledSourceIds] comes from the Turn-Kontext-Auswahl screen — the
   /// context-sources ids the user left toggled on. Pass null to let the
   /// backend fall back to its own default source scope.
@@ -203,8 +223,16 @@ class RealtimeDialogController {
     _liveTranscriptItemId = null;
     _liveTranscriptBuffer.clear();
     _eventLog.clear();
+    _voiceTurnLatenciesMs.clear();
+    _pendingTurnSpeechStoppedAt = null;
     _dialogSessionId = null;
     _consecutiveListeningTurns = 0;
+    _rateLimitRetryTimer?.cancel();
+    _rateLimitRetryTimer = null;
+    _realtimeRateLimitRetryAttempts = 0;
+    _lastResponseCreateEvent = null;
+    _deferredWebToolResponse = null;
+    _fillerSpokenForNextToolCall = false;
     _setThinking(false);
     _setState(RealtimeConnectionState.connecting);
 
@@ -306,16 +334,27 @@ class RealtimeDialogController {
             ? 'Guten Tag'
             : 'Guten Abend';
 
-    await sendEvent({
-      'type': 'response.create',
-      'response': {
+    await _requestResponse(
+      response: {
         'input': <dynamic>[],
         'instructions':
             'Sag jetzt ausschlieÃŸlich: "$greeting. Was steht heute an?" '
                 'Keine Funktionsaufrufe und nichts anderes.',
         'tool_choice': 'none',
       },
-    });
+    );
+  }
+
+  /// Starts a Realtime response and remembers the exact request so a
+  /// rate-limited response can be retried without losing filler/tool-choice
+  /// constraints.
+  Future<void> _requestResponse({Map<String, dynamic>? response}) async {
+    final event = <String, dynamic>{
+      'type': 'response.create',
+      if (response != null) 'response': response,
+    };
+    _lastResponseCreateEvent = event;
+    await sendEvent(event);
   }
 
   /// Pushes a new `instructions` text to the already-running session — used
@@ -451,11 +490,25 @@ class RealtimeDialogController {
     switch (event['type']) {
       case 'input_audio_buffer.speech_stopped':
         _setThinking(true);
+        _pendingTurnSpeechStoppedAt = DateTime.now();
       case 'response.output_audio.delta':
       case 'response.audio.delta':
+        _setThinking(false);
+        _recordVoiceTurnLatency();
       case 'error':
         _setThinking(false);
     }
+  }
+
+  /// Only the first audio delta after a speech_stopped counts — later
+  /// deltas in the same response, and any deltas from a follow-up
+  /// response.create (continuation after a filler, a rate-limit retry),
+  /// aren't a new turn's start-to-first-sound latency.
+  void _recordVoiceTurnLatency() {
+    final startedAt = _pendingTurnSpeechStoppedAt;
+    if (startedAt == null) return;
+    _pendingTurnSpeechStoppedAt = null;
+    _voiceTurnLatenciesMs.add(DateTime.now().difference(startedAt).inMilliseconds);
   }
 
   /// Polls the local mic's `media-source` WebRTC stat for its real-time
@@ -541,6 +594,83 @@ class RealtimeDialogController {
     }
   }
 
+  bool _scheduleRealtimeRateLimitRetry(Map<String, dynamic> response) {
+    final statusDetails = response['status_details'];
+    final error =
+        statusDetails is Map<String, dynamic> ? statusDetails['error'] : null;
+    final errorMap = error is Map<String, dynamic> ? error : null;
+    final code = errorMap?['code']?.toString().toLowerCase() ?? '';
+    final type = errorMap?['type']?.toString().toLowerCase() ?? '';
+    final message = errorMap?['message']?.toString() ?? '';
+    final normalizedMessage = message.toLowerCase();
+    final isRateLimit = code.contains('rate_limit') ||
+        type.contains('rate_limit') ||
+        normalizedMessage.contains('rate limit');
+    if (!isRateLimit) return false;
+
+    if (_realtimeRateLimitRetryAttempts >= _maxRealtimeRateLimitRetries) {
+      _lastResponseCreateEvent = null;
+      _setThinking(false);
+      if (!_processingActivityController.isClosed) {
+        _processingActivityController.add(
+          'Realtime-Limit: Antwort konnte nicht erneut gestartet werden',
+        );
+      }
+      return true;
+    }
+
+    final retryDelay = _rateLimitRetryDelay(message);
+    _realtimeRateLimitRetryAttempts++;
+    _rateLimitRetryTimer?.cancel();
+    _setThinking(true);
+    if (!_processingActivityController.isClosed) {
+      _processingActivityController.add(
+        'Realtime-Limit: automatischer neuer Versuch '
+        '($_realtimeRateLimitRetryAttempts/'
+        '$_maxRealtimeRateLimitRetries)',
+      );
+    }
+    _rateLimitRetryTimer = Timer(retryDelay, () async {
+      if (!isConnected || _disposed) return;
+      final event = _lastResponseCreateEvent ??
+          const <String, dynamic>{'type': 'response.create'};
+      try {
+        await sendEvent(Map<String, dynamic>.from(event));
+      } on StateError {
+        _setThinking(false);
+      }
+    });
+    return true;
+  }
+
+  Duration _rateLimitRetryDelay(String message) {
+    final secondsMatch = RegExp(
+      r'(?:try again in|retry after)\s+([0-9]+(?:\.[0-9]+)?)s',
+      caseSensitive: false,
+    ).firstMatch(message);
+    final millisecondsMatch = RegExp(
+      r'(?:try again in|retry after)\s+([0-9]+)ms',
+      caseSensitive: false,
+    ).firstMatch(message);
+
+    var milliseconds = 2000;
+    if (secondsMatch != null) {
+      milliseconds =
+          ((double.tryParse(secondsMatch.group(1)!) ?? 2) * 1000).ceil();
+    } else if (millisecondsMatch != null) {
+      milliseconds = int.tryParse(millisecondsMatch.group(1)!) ?? 2000;
+    }
+    milliseconds += _rateLimitRetrySafetyBuffer.inMilliseconds;
+    return Duration(milliseconds: milliseconds.clamp(500, 8000).toInt());
+  }
+
+  void _clearRealtimeRateLimitRetry() {
+    _rateLimitRetryTimer?.cancel();
+    _rateLimitRetryTimer = null;
+    _realtimeRateLimitRetryAttempts = 0;
+    _lastResponseCreateEvent = null;
+  }
+
   /// Dispatches function calls the model made in a just-finished response
   /// (see the `tools` config in web/src/app/api/realtime-token/route.ts).
   /// `response.done` already carries each function_call item's complete
@@ -563,9 +693,19 @@ class RealtimeDialogController {
   /// runs. "zuhoeren" normally skips the follow-up. After several
   /// consecutive listening-only turns, the client deliberately adds one
   /// brief help offer so a longer session does not feel abandoned.
-  Future<void> _handleResponseDone(Map<String, dynamic> event) async {
+  Future<void> _handleResponseDone(
+    Map<String, dynamic> event, {
+    bool allowWebToolFiller = true,
+  }) async {
     final response = event['response'];
     if (response is! Map<String, dynamic>) return;
+    if (response['status'] == 'failed') {
+      if (_scheduleRealtimeRateLimitRetry(response)) return;
+      _clearRealtimeRateLimitRetry();
+      _setThinking(false);
+      return;
+    }
+    _clearRealtimeRateLimitRetry();
     final outputItems = response['output'];
     if (outputItems is! List) return;
 
@@ -573,6 +713,21 @@ class RealtimeDialogController {
         .whereType<Map<String, dynamic>>()
         .where((item) => item['type'] == 'function_call')
         .toList();
+
+    // A model may call a web tool directly instead of first asking for the
+    // normal dialog-state filler turn. In that case, defer the completed
+    // tool call, speak the filler now, then execute the saved call as soon as
+    // the filler response finishes.
+    if (_deferredWebToolResponse != null && functionCalls.isEmpty) {
+      final deferredResponse = _deferredWebToolResponse!;
+      _deferredWebToolResponse = null;
+      _setThinking(true);
+      await _handleResponseDone(
+        deferredResponse,
+        allowWebToolFiller: false,
+      );
+      return;
+    }
 
     if (_awaitingFillerTurn) {
       _awaitingFillerTurn = false;
@@ -582,17 +737,41 @@ class RealtimeDialogController {
       // with the search it deferred; if it somehow does anyway, fall
       // through to the normal handling below instead of dropping it.
       if (functionCalls.isEmpty) {
+        _fillerSpokenForNextToolCall = true;
         _setThinking(true);
         try {
-          await sendEvent({
-            'type': 'response.create',
-            'response': {'instructions': _continueAfterFillerInstructions},
-          });
+          await _requestResponse(
+            response: {'instructions': _continueAfterFillerInstructions},
+          );
         } on StateError {
           // Session ended while the filler was being spoken.
         }
         return;
       }
+    }
+
+    final fillerWasAlreadySpoken = _fillerSpokenForNextToolCall;
+    if (functionCalls.isNotEmpty) {
+      _fillerSpokenForNextToolCall = false;
+    }
+    final hasWebToolCall = functionCalls.any(
+      (call) => _webToolNames.contains(call['name']),
+    );
+    if (allowWebToolFiller && hasWebToolCall && !fillerWasAlreadySpoken) {
+      _deferredWebToolResponse = event;
+      _setThinking(true);
+      try {
+        await _requestResponse(
+          response: {
+            'instructions': _fillerInstructions,
+            'tool_choice': 'none',
+          },
+        );
+      } on StateError {
+        _deferredWebToolResponse = null;
+        _setThinking(false);
+      }
+      return;
     }
 
     if (functionCalls.isEmpty) {
@@ -655,6 +834,15 @@ class RealtimeDialogController {
         case 'search_web':
           outputPayload = await _handleWebSearch(call);
           needsFollowUpResponse = true;
+          if (outputPayload.contains('"error"')) {
+            followUpResponseOverrides = {
+              'instructions':
+                  'Die Websuche ist fehlgeschlagen oder hat zu lange '
+                      'gedauert. Sage das jetzt kurz und hörbar auf Deutsch '
+                      'und bitte den Nutzer, es erneut zu versuchen.',
+              'tool_choice': 'none',
+            };
+          }
         case 'search_context_and_web':
           outputPayload = await _handleContextAndWebSearch(call);
           needsFollowUpResponse = true;
@@ -710,11 +898,7 @@ class RealtimeDialogController {
 
     if (needsFollowUpResponse) {
       try {
-        await sendEvent({
-          'type': 'response.create',
-          if (followUpResponseOverrides != null)
-            'response': followUpResponseOverrides,
-        });
+        await _requestResponse(response: followUpResponseOverrides);
       } on StateError {
         // Same as above.
       }
@@ -985,7 +1169,13 @@ class RealtimeDialogController {
 
     _audioLevelTimer?.cancel();
     _audioLevelTimer = null;
+    _rateLimitRetryTimer?.cancel();
+    _rateLimitRetryTimer = null;
+    _realtimeRateLimitRetryAttempts = 0;
+    _lastResponseCreateEvent = null;
+    _deferredWebToolResponse = null;
     _awaitingFillerTurn = false;
+    _fillerSpokenForNextToolCall = false;
     _dialogSessionId = null;
     _setThinking(false);
     _dataChannel = null;
