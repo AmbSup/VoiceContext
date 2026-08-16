@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import '../api/active_context_client.dart';
 import '../api/ephemeral_token_client.dart';
 import '../api/retrieval_client.dart';
+import '../api/saved_results_client.dart';
 
 enum RealtimeConnectionState {
   idle,
@@ -40,7 +41,9 @@ const _fillerInstructions =
     '"Einen Moment bitte" oder "Lass mich kurz nachsehen" — keine weiteren '
     'Informationen, keine Funktionsaufrufe, nichts anderes.';
 const _continueAfterFillerInstructions =
-    'Rufe jetzt die passende Funktion auf (retrieve_memory für thematische '
+    'Rufe jetzt die passende Funktion auf (save_result bei einem ausdrücklichen '
+    'Auftrag, etwas als E-Mail, Aufgabe oder Frage für später zu speichern; '
+    'retrieve_memory für thematische '
     'Suche, list_context_items falls ein konkreter Kontext-Name genannt '
     'wurde, search_web für ausschließlich aktuelle oder allgemeine externe '
     'Informationen, search_context_and_web wenn persönlicher Context mit '
@@ -74,11 +77,13 @@ class RealtimeDialogController {
     EphemeralTokenClient? tokenClient,
     ActiveContextClient? activeContextClient,
     RetrievalClient? retrievalClient,
+    SavedResultsClient? savedResultsClient,
     http.Client? httpClient,
     Uri? realtimeEndpoint,
   })  : _tokenClient = tokenClient ?? EphemeralTokenClient(),
         _activeContextClient = activeContextClient ?? ActiveContextClient(),
         _retrievalClient = retrievalClient ?? RetrievalClient(),
+        _savedResultsClient = savedResultsClient ?? SavedResultsClient(),
         _httpClient = httpClient ?? http.Client(),
         _ownsHttpClient = httpClient == null,
         _realtimeEndpointOverride = realtimeEndpoint;
@@ -86,6 +91,7 @@ class RealtimeDialogController {
   final EphemeralTokenClient _tokenClient;
   final ActiveContextClient _activeContextClient;
   final RetrievalClient _retrievalClient;
+  final SavedResultsClient _savedResultsClient;
   final http.Client _httpClient;
   final bool _ownsHttpClient;
   final Uri? _realtimeEndpointOverride;
@@ -118,6 +124,7 @@ class RealtimeDialogController {
   String? _liveTranscriptItemId;
   final _liveTranscriptBuffer = StringBuffer();
   final _eventLog = <Map<String, dynamic>>[];
+  String? _dialogSessionId;
 
   Stream<Map<String, dynamic>> get events => _eventController.stream;
   Stream<RealtimeConnectionState> get states => _stateController.stream;
@@ -162,6 +169,12 @@ class RealtimeDialogController {
   RealtimeConnectionState get state => _state;
   bool get isConnected => _state == RealtimeConnectionState.connected;
 
+  /// Associates direct voice actions with the durable Dialog-Session row.
+  /// Set immediately after DialogSessionRepository.startSession succeeds.
+  void bindDialogSession(String dialogSessionId) {
+    _dialogSessionId = dialogSessionId;
+  }
+
   /// Accumulated "Sprecher: Text" lines for the current/last session, built
   /// from `conversation.item.input_audio_transcription.completed` (user)
   /// and `response.output_audio_transcript.done` (assistant) events — see
@@ -190,6 +203,7 @@ class RealtimeDialogController {
     _liveTranscriptItemId = null;
     _liveTranscriptBuffer.clear();
     _eventLog.clear();
+    _dialogSessionId = null;
     _consecutiveListeningTurns = 0;
     _setThinking(false);
     _setState(RealtimeConnectionState.connecting);
@@ -303,6 +317,17 @@ class RealtimeDialogController {
       },
     });
   }
+
+  /// Pushes a new `instructions` text to the already-running session — used
+  /// by the Turn-Kontext-Panel to apply a source-toggle change live, for
+  /// the next Redebeitrag, without restarting the WebRTC connection. A
+  /// partial `session.update` only touches the fields included, so tools/
+  /// audio config etc. are left as they are. Throws `StateError` (same
+  /// contract as [sendEvent]) if the session isn't connected.
+  Future<void> updateInstructions(String instructions) => sendEvent({
+        'type': 'session.update',
+        'session': {'instructions': instructions},
+      });
 
   /// Sends a documented Realtime client event over the `oai-events` channel.
   Future<void> sendEvent(Map<String, dynamic> event) async {
@@ -581,6 +606,8 @@ class RealtimeDialogController {
 
     var needsFollowUpResponse = false;
     Map<String, dynamic>? followUpResponseOverrides;
+    final hasSaveResultCall =
+        functionCalls.any((call) => call['name'] == 'save_result');
 
     for (final call in functionCalls) {
       final name = call['name'] as String? ?? '';
@@ -592,7 +619,7 @@ class RealtimeDialogController {
         case 'set_dialog_state':
           final dialogState = _handleSetDialogState(call);
           outputPayload = jsonEncode({'ok': true});
-          if (dialogState == 'antworten') {
+          if (dialogState == 'antworten' && !hasSaveResultCall) {
             _consecutiveListeningTurns = 0;
             // Force a dedicated filler-only turn next rather than a plain
             // follow-up — see the constants above for why.
@@ -602,7 +629,8 @@ class RealtimeDialogController {
               'instructions': _fillerInstructions,
               'tool_choice': 'none',
             };
-          } else if (dialogState == 'nachfragen') {
+          } else if (dialogState == 'antworten' ||
+              dialogState == 'nachfragen') {
             _consecutiveListeningTurns = 0;
             needsFollowUpResponse = true;
           } else if (dialogState == 'zuhoeren') {
@@ -629,6 +657,9 @@ class RealtimeDialogController {
           needsFollowUpResponse = true;
         case 'search_context_and_web':
           outputPayload = await _handleContextAndWebSearch(call);
+          needsFollowUpResponse = true;
+        case 'save_result':
+          outputPayload = await _handleSaveResult(call);
           needsFollowUpResponse = true;
         case 'propose_active_context_switch':
           outputPayload = await _handleProposeActiveContext(call);
@@ -751,6 +782,44 @@ class RealtimeDialogController {
       return jsonEncode({'answer': answer});
     } catch (error) {
       return jsonEncode({'error': 'web_search_failed: $error'});
+    }
+  }
+
+  Future<String> _handleSaveResult(Map<String, dynamic> call) async {
+    final args = _decodeArguments(call['arguments']);
+    final dialogSessionId = _dialogSessionId;
+    final kind = args['kind'] as String? ?? '';
+    final title = args['title'] as String? ?? '';
+    final content = args['content'] as String? ?? '';
+    if (dialogSessionId == null) {
+      return jsonEncode({'error': 'dialog_session_not_ready'});
+    }
+    if (!{'email', 'aufgabe', 'frage'}.contains(kind) ||
+        title.trim().isEmpty ||
+        content.trim().isEmpty) {
+      return jsonEncode({'error': 'invalid_saved_result'});
+    }
+    try {
+      final result = await _savedResultsClient.create(
+        dialogSessionId: dialogSessionId,
+        contextId: _activeContext?.id,
+        kind: kind,
+        title: title,
+        content: content,
+        recipient: args['recipient'] as String?,
+        dueAt: args['due_at'] as String?,
+      );
+      return jsonEncode({
+        'status': 'saved',
+        'id': result.id,
+        'kind': result.kind,
+        'workflow_status': result.status,
+        'instruction': result.kind == 'email'
+            ? 'Bestätige kurz, dass der E-Mail-Entwurf gespeichert, aber nicht versendet wurde.'
+            : 'Bestätige kurz, dass der Punkt in Ergebnisse gespeichert wurde.',
+      });
+    } catch (error) {
+      return jsonEncode({'error': 'save_result_failed: $error'});
     }
   }
 
@@ -917,6 +986,7 @@ class RealtimeDialogController {
     _audioLevelTimer?.cancel();
     _audioLevelTimer = null;
     _awaitingFillerTurn = false;
+    _dialogSessionId = null;
     _setThinking(false);
     _dataChannel = null;
     _localStream = null;

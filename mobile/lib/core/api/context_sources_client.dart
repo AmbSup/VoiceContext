@@ -1,8 +1,8 @@
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
-import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'authenticated_http.dart';
 import 'ephemeral_token_client.dart' show HttpException;
 
 /// One selectable source for the Turn-Kontext-Auswahl screen: the confirmed
@@ -57,18 +57,14 @@ class ContextSourcesClient {
             );
 
   final String _backendBaseUrl;
-  static const _requestTimeout = Duration(seconds: 15);
 
   Future<ContextSourcesResult> fetchSources() async {
-    final session = Supabase.instance.client.auth.currentSession;
-    if (session == null) {
-      throw StateError('No Supabase session — user must be logged in.');
-    }
-
-    final response = await http.get(
-      Uri.parse('$_backendBaseUrl/api/context-sources'),
-      headers: {'Authorization': 'Bearer ${session.accessToken}'},
-    ).timeout(_requestTimeout);
+    final response = await sendAuthenticated(
+      (headers) => http.get(
+        Uri.parse('$_backendBaseUrl/api/context-sources'),
+        headers: headers,
+      ),
+    );
 
     if (response.statusCode != 200) {
       throw HttpException(
@@ -83,10 +79,37 @@ class ContextSourcesClient {
           .whereType<Map<String, dynamic>>()
           .map(ContextSource.fromJson)
           .toList(),
-      defaultEnabledSourceIds: (body['defaultEnabledSourceIds'] as List<dynamic>? ?? const [])
-          .whereType<String>()
-          .toList(),
+      defaultEnabledSourceIds:
+          (body['defaultEnabledSourceIds'] as List<dynamic>? ?? const [])
+              .whereType<String>()
+              .toList(),
       tokenBudget: body['tokenBudget'] as int? ?? 0,
     );
+  }
+
+  /// Freshly rendered Realtime instructions text for [enabledSourceIds] —
+  /// used to push a live context change to an already-running Dialog-Session
+  /// (see RealtimeDialogController.updateInstructions). `content` never
+  /// reaches the client via [fetchSources] on purpose, so the text has to
+  /// be built server-side.
+  Future<String> fetchInstructions(List<String> enabledSourceIds) async {
+    final response = await sendAuthenticated(
+      (headers) => http.post(
+        Uri.parse('$_backendBaseUrl/api/context-sources/instructions'),
+        headers: headers,
+        body: jsonEncode({'enabledSourceIds': enabledSourceIds}),
+      ),
+      headers: const {'Content-Type': 'application/json'},
+    );
+
+    if (response.statusCode != 200) {
+      throw HttpException(
+        'Kontext-Aktualisierung fehlgeschlagen (${response.statusCode}): '
+        '${response.body}',
+      );
+    }
+
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    return body['instructions'] as String;
   }
 }

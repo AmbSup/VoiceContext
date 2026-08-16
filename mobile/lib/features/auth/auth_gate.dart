@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../dialog_session/dialog_session_screen.dart';
+import '../shell/main_shell.dart';
 import 'login_screen.dart';
 
 /// Switches between the login screen and the Dialog-Session screen based on
@@ -22,9 +22,7 @@ class AuthGate extends StatelessWidget {
       builder: (context, snapshot) {
         final session = snapshot.data?.session ??
             Supabase.instance.client.auth.currentSession;
-        return session == null
-            ? const LoginScreen()
-            : const DialogSessionScreen();
+        return session == null ? const LoginScreen() : const MainShell();
       },
     );
   }

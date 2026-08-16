@@ -35,7 +35,9 @@ export async function GET(request: Request) {
 
   const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
   const { sources, defaultEnabledSourceIds, tokenBudget } =
-    await listContextSources(supabase, contextSpaceId, user.id);
+    await listContextSources(supabase, contextSpaceId, user.id, {
+      includeContent: false,
+    });
 
   // `content` is the pre-rendered instruction text realtime-token/route.ts
   // uses server-side to build the Realtime session's system prompt — never

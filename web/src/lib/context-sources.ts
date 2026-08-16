@@ -62,7 +62,7 @@ interface DocumentRow {
 interface DocumentChunkRow {
   document_id: string;
   token_count: number;
-  content: string;
+  content?: string;
 }
 
 // RecentSessionRow (short-term-memory.ts) doesn't include this column since
@@ -76,7 +76,15 @@ export async function listContextSources(
   supabase: SupabaseClient,
   contextSpaceId: string,
   userId: string,
+  options: { includeContent?: boolean } = {},
 ): Promise<ContextSourcesResult> {
+  const includeContent = options.includeContent ?? true;
+  const sessionColumns: string = includeContent
+    ? "id, started_context_id, ended_at, full_transcript, short_term_memory, short_term_memory_token_count"
+    : "id, started_context_id, ended_at, short_term_memory, short_term_memory_token_count";
+  const documentChunkColumns: string = includeContent
+    ? "document_id, token_count, content"
+    : "document_id, token_count";
   const [activeContext, contextsResult, sessionsResult] = await Promise.all([
     getConfirmedActiveContext(supabase, contextSpaceId, userId),
     supabase
@@ -85,9 +93,7 @@ export async function listContextSources(
       .eq("context_space_id", contextSpaceId),
     supabase
       .from("dialog_sessions")
-      .select(
-        "id, started_context_id, ended_at, full_transcript, short_term_memory, short_term_memory_token_count",
-      )
+      .select(sessionColumns)
       .eq("context_space_id", contextSpaceId)
       .not("ended_at", "is", null)
       .order("ended_at", { ascending: false })
@@ -124,7 +130,7 @@ export async function listContextSources(
   const { data: chunkRows, error: chunkError } = documentIds.length
     ? await supabase
         .from("document_chunks")
-        .select("document_id, token_count, content")
+        .select(documentChunkColumns)
         .in("document_id", documentIds)
     : { data: [], error: null };
   if (chunkError) throw new Error(chunkError.message);
@@ -154,7 +160,9 @@ export async function listContextSources(
   const contentByContext = new Map(
     contextRows.map((context) => [
       context.id,
-      `### Kontext: ${context.name}\n${context.description ?? ""}\n${(activeContentsByContext.get(context.id) ?? []).join("\n")}`,
+      includeContent
+        ? `### Kontext: ${context.name}\n${context.description ?? ""}\n${(activeContentsByContext.get(context.id) ?? []).join("\n")}`
+        : "",
     ]),
   );
 
@@ -165,7 +173,7 @@ export async function listContextSources(
     chunksByDocument.set(chunk.document_id, chunks);
   }
 
-  const sessionRows = (sessionsResult.data ?? []) as SessionSourceRow[];
+  const sessionRows = (sessionsResult.data ?? []) as unknown as SessionSourceRow[];
   // Same promotion rule loadShortTermMemory already applies: the most
   // recent session overall is the baseline default; a session started in
   // the active context is promoted ahead of other, older sessions.
@@ -213,7 +221,9 @@ export async function listContextSources(
       meta: contextName ? `Kontext: ${contextName}` : "Dokument",
       tokenCount: chunks.reduce((sum, c) => sum + c.token_count, 0),
       defaultEnabled: false,
-      content: `### Dokument: ${doc.file_name}\n${chunks.map((c) => c.content).join("\n\n")}`,
+      content: includeContent
+        ? `### Dokument: ${doc.file_name}\n${chunks.map((c) => c.content ?? "").join("\n\n")}`
+        : "",
     });
   }
 
@@ -228,7 +238,7 @@ export async function listContextSources(
         : "Ohne Übergabe-Notiz",
       tokenCount: session.short_term_memory_token_count ?? 0,
       defaultEnabled: isDefault,
-      content: renderSessionBlock(session),
+      content: includeContent ? renderSessionBlock(session) : "",
     });
     if (isDefault) defaultEnabledSourceIds.push(session.id);
   }

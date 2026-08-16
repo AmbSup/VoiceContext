@@ -16,9 +16,15 @@ import { corsJson, corsPreflight } from "@/lib/cors";
 // Deliberately thin: no LLM answer synthesis here, unlike
 // web/src/app/search/actions.ts — the Realtime model itself speaks the
 // answer live, grounded on the raw memory items this route returns.
-// Without an explicit context_name, retrieval starts in the confirmed active
-// context. If that yields nothing, it makes one controlled Context-Space-wide
-// fallback. An explicitly named context remains scoped to that single turn.
+// Retrieval starts scoped — either to the confirmed active context (no
+// context_name given) or to the explicitly named one. If that scoped search
+// yields nothing, it makes one controlled Context-Space-wide fallback either
+// way: the model is instructed to only pass context_name when the user
+// explicitly named one, but doesn't always follow that reliably (confirmed
+// via a live session where it scoped a person lookup to the wrong context
+// after mishearing the name) — an explicit-but-wrong context_name shouldn't
+// be able to hide a real match elsewhere any more than the active context
+// silently defaulting to the wrong scope should.
 //
 // Also searches Kontext name/description (match_contexts, see
 // supabase/migrations/0011_context_embeddings.sql): CONTEXT.md treats a
@@ -198,7 +204,10 @@ export async function POST(request: Request) {
       });
     let retrieval = await retrieve(contextId);
     let fellBackToContextSpace = false;
-    if (isActiveContextScope && retrieval.sources.length === 0) {
+    // Falls back for both scope kinds now — an explicit context_name is
+    // still tried first (respects a real user-stated focus), but an empty
+    // result there no longer dead-ends the turn; see the comment above.
+    if (contextId && retrieval.sources.length === 0) {
       retrieval = await retrieve();
       fellBackToContextSpace = true;
     }
