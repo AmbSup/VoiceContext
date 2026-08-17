@@ -324,6 +324,13 @@ export async function POST(request: Request) {
         type: "realtime",
         model: REALTIME_MODEL,
         instructions,
+        // Unset defaults to a higher effort than most production voice
+        // agents need (per OpenAI's own prompting guide for
+        // gpt-realtime-2/2.1: "start with low for most production voice
+        // agents"). Directly trades reasoning depth for latency on exactly
+        // the path this session's performance_logs instrumentation exists
+        // to measure — revisit if responses start missing obvious nuance.
+        reasoning: { effort: "low" },
         audio: {
           input: {
             format: { type: "audio/pcm", rate: 24000 },
