@@ -36,12 +36,14 @@ import type { PerfTimer } from "@/lib/perf-log";
 // the query, so a candidate with no lexical or vector grounding is dropped
 // even if reranking scored it above DEFAULT_MIN_RELEVANCE.
 
-const RERANK_MODEL = "gpt-4.1-mini"; // same model already used for Suche's Answer Engine
-// "before" half of a before/after comparison against Fast mode (see
-// web/src/app/api/web-search/route.ts's WEB_SEARCH_SERVICE_TIER for the
-// same idea applied there) — off for now so /performance collects a
-// Default-tier baseline for the rerank phase first.
-const RERANK_SERVICE_TIER: string | undefined = undefined;
+const DEFAULT_RERANK_MODEL = "gpt-4.1-mini";
+const LIVE_RERANK_MODEL = "gpt-4.1-nano";
+const LIVE_RERANK_SERVICE_TIER = "fast";
+// Scoring every candidate forces the model to emit a large structured array
+// and was repeatedly hitting the live path's 5-second timeout. Hybrid RRF has
+// already ranked the pool, so only its strongest candidates need the more
+// expensive semantic judgment.
+const MAX_RERANK_CANDIDATES = 12;
 // Experimental starting values, not yet calibrated against real data — see
 // the roadmap's later "Retrieval-Evaluation" step (30-50 real queries,
 // Precision@5/Recall@5/no-result accuracy). Revisit both once that exists.
@@ -270,6 +272,8 @@ async function rerankCandidates(
   candidates: Candidate[],
   userId: string,
   timeoutMs?: number,
+  model = DEFAULT_RERANK_MODEL,
+  serviceTier?: string,
 ): Promise<Map<string, number>> {
   // A real AbortController, not just a losing Promise.race: without this,
   // a timed-out rerank call keeps running against OpenAI in the background
@@ -282,10 +286,10 @@ async function rerankCandidates(
 
   try {
     const response = await createChatCompletion({
-      model: RERANK_MODEL,
+      model,
       safetyIdentifier: userId,
       signal: controller.signal,
-      serviceTier: RERANK_SERVICE_TIER,
+      serviceTier,
       messages: [
         { role: "system", content: buildRerankSystemPrompt() },
         { role: "user", content: buildRerankUserPrompt(query, candidates) },
@@ -513,13 +517,29 @@ export async function hybridRetrieve(params: {
   }
 
   let relevanceById: Map<string, number> | null = null;
-  if (rerank.mode === "llm") {
+  // A lexical match is already direct grounding. On the latency-sensitive
+  // voice path, avoid a second model round trip for queries such as
+  // "Statiker" where Postgres FTS has found the literal term. The web search
+  // path still reranks because it does not supply a timeout.
+  const canUseLexicalFastPath =
+    rerank.mode === "llm" &&
+    rerank.timeoutMs !== undefined &&
+    candidates.some((candidate) => candidate.fts_rank > 0);
+  if (rerank.mode === "llm" && !canUseLexicalFastPath) {
     try {
+      const isLiveRerank = rerank.timeoutMs !== undefined;
+      const rerankCandidatesPool = isLiveRerank
+        ? [...candidates]
+            .sort((a, b) => b.fused_score - a.fused_score)
+            .slice(0, MAX_RERANK_CANDIDATES)
+        : candidates;
       relevanceById = await rerankCandidates(
         query,
-        candidates,
+        rerankCandidatesPool,
         userId,
         rerank.timeoutMs,
+        isLiveRerank ? LIVE_RERANK_MODEL : DEFAULT_RERANK_MODEL,
+        isLiveRerank ? LIVE_RERANK_SERVICE_TIER : undefined,
       );
     } catch {
       // Reranking is an enhancement, not the source of truth for whether

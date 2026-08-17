@@ -3,7 +3,11 @@ import {
   getConfirmedActiveContext,
   resolveContext,
 } from "@/lib/active-context";
-import { emptyRetrievalUsage, hybridRetrieve } from "@/lib/retrieval";
+import {
+  emptyRetrievalUsage,
+  hybridRetrieve,
+  type RerankMode,
+} from "@/lib/retrieval";
 import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
 import { corsJson, corsPreflight } from "@/lib/cors";
 import { logPerf, PerfTimer } from "@/lib/perf-log";
@@ -48,15 +52,10 @@ import { logPerf, PerfTimer } from "@/lib/perf-log";
 // (api/realtime-token/route.ts) can pass when the user's question makes
 // them unambiguous (e.g. a named Kontext or an explicit time frame).
 
-// Raised from an initial 2500ms after live reproduction: for a real query
-// ("Wo wohne ich?") the correct stored fact scored only 0.363 cosine
-// similarity — nowhere near a literal-overlap FTS hit — so this path
-// depends on reranking actually completing, not falling back. 2500ms was
-// tight enough to occasionally lose that race (serverless cold start,
-// ordinary network jitter) and silently drop the real answer. The client's
-// hard budget is RetrievalClient's 15s HTTP timeout (embedding + 2 RPCs +
-// rerank + margin all fit well inside that even at 5000ms).
-const RERANK_TIMEOUT_MS = 5000;
+// Production measurements showed the former 5-second budget being exhausted
+// on every recent live request. The reranker now sees at most 12 candidates,
+// uses the nano model + Fast tier, and exact FTS hits bypass it entirely.
+const RERANK_TIMEOUT_MS = 3000;
 
 // Basic ISO-date validation for occurred_from/occurred_to: an unparseable
 // value is dropped (treated as not provided) rather than handed to the RPC,
@@ -202,7 +201,15 @@ export async function POST(request: Request) {
       }
     }
 
-    const retrieve = (filterContextId?: string, useTimer?: PerfTimer) =>
+    const liveRerank: RerankMode = {
+      mode: "llm",
+      timeoutMs: RERANK_TIMEOUT_MS,
+    };
+    const retrieve = (
+      filterContextId?: string,
+      useTimer?: PerfTimer,
+      rerank: RerankMode = liveRerank,
+    ) =>
       hybridRetrieve({
         supabase,
         query,
@@ -217,18 +224,35 @@ export async function POST(request: Request) {
         // Optional, time-boxed: the live voice path is bounded by
         // RetrievalClient's 15s HTTP timeout, so a reranker here must not be
         // allowed to run unbounded on top of the embedding + DB round trips.
-        rerank: { mode: "llm", timeoutMs: RERANK_TIMEOUT_MS },
+        rerank,
         timer: useTimer,
       });
     // Timer only passed on the first attempt — hybridRetrieve's phase marks
     // (embedding/rpc_candidates/rerank) would otherwise overwrite themselves
     // on a fallback retry. total_ms still covers both attempts either way.
-    let retrieval = await retrieve(contextId, timer);
+    // The confirmed default context is only a useful fast path when it has
+    // literal grounding for the query. Probe it without a model round trip;
+    // if it only yields weak semantic neighbours, search the whole Context
+    // Space once with the fast live reranker. This prevents an unrelated
+    // active context from suppressing the real answer elsewhere.
+    const probeActiveContext = Boolean(contextId && isActiveContextScope);
+    let retrieval = await retrieve(
+      contextId,
+      timer,
+      probeActiveContext ? { mode: "off" } : liveRerank,
+    );
     let fellBackToContextSpace = false;
     // Falls back for both scope kinds now — an explicit context_name is
     // still tried first (respects a real user-stated focus), but an empty
     // result there no longer dead-ends the turn; see the comment above.
-    if (contextId && retrieval.sources.length === 0) {
+    const activeContextHasLexicalHit = retrieval.sources.some(
+      (source) => source.fts_rank > 0,
+    );
+    if (
+      contextId &&
+      (retrieval.sources.length === 0 ||
+        (isActiveContextScope && !activeContextHasLexicalHit))
+    ) {
       retrieval = await retrieve();
       timer.mark("fallback_retrieve");
       fellBackToContextSpace = true;
