@@ -1,6 +1,5 @@
 import mammoth from "mammoth";
 import WordExtractor from "word-extractor";
-import { PDFParse } from "pdf-parse";
 
 export const DOCUMENT_FILE_LIMITS: Record<string, number> = {
   ".txt": 1 * 1024 * 1024,
@@ -31,6 +30,13 @@ export async function extractDocumentText(file: File, extension: string) {
   }
   const buffer = Buffer.from(await file.arrayBuffer());
   if (extension === ".pdf") {
+    // pdfjs-dist uses these native Canvas exports to install DOMMatrix,
+    // ImageData and Path2D in Node. Keeping both imports inside the PDF
+    // branch prevents their module initialization from breaking unrelated
+    // Capture formats and makes the native dependency visible to Vercel's
+    // output-file tracer.
+    await import("@napi-rs/canvas");
+    const { PDFParse } = await import("pdf-parse");
     const parser = new PDFParse({ data: buffer });
     try {
       return (await parser.getText()).text.trim();
