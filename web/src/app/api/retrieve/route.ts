@@ -53,8 +53,8 @@ import { logPerf, PerfTimer } from "@/lib/perf-log";
 // them unambiguous (e.g. a named Kontext or an explicit time frame).
 
 // Production measurements showed the former 5-second budget being exhausted
-// on every recent live request. The reranker now sees at most 12 candidates,
-// uses the nano model + Fast tier, and exact FTS hits bypass it entirely.
+// on every recent live request. The reranker now sees a small, source-diverse
+// candidate pool and uses the nano model + Fast tier.
 const RERANK_TIMEOUT_MS = 3000;
 
 // Basic ISO-date validation for occurred_from/occurred_to: an unparseable
