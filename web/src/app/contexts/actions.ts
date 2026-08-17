@@ -86,3 +86,45 @@ export async function setActiveContext(formData: FormData) {
   if (error) throw error;
   revalidatePath("/contexts");
 }
+
+export async function deleteEmptyContext(
+  contextId: string,
+): Promise<string | undefined> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return "Nicht angemeldet";
+  if (!contextId) return "Kontext fehlt";
+
+  const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
+  const { data: context, error: contextError } = await supabase
+    .from("contexts")
+    .select("id, memory_context_links(count)")
+    .eq("id", contextId)
+    .eq("context_space_id", contextSpaceId)
+    .maybeSingle();
+
+  if (contextError) return contextError.message;
+  if (!context) return "Kontext nicht gefunden";
+
+  const itemCount = context.memory_context_links[0]?.count ?? 0;
+  if (itemCount > 0) {
+    return "Der Kontext kann nur ohne Memory-Items gelöscht werden";
+  }
+
+  const { data: deleted, error: deleteError } = await supabase
+    .from("contexts")
+    .delete()
+    .eq("id", contextId)
+    .eq("context_space_id", contextSpaceId)
+    .select("id")
+    .maybeSingle();
+
+  if (deleteError) return deleteError.message;
+  if (!deleted) return "Kontext konnte nicht gelöscht werden";
+
+  revalidatePath("/contexts");
+  revalidatePath("/search");
+  return undefined;
+}

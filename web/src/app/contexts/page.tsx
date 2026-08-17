@@ -5,6 +5,7 @@ import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
 import { countTokens } from "@/lib/token-count";
 import { AppNav } from "@/components/app-nav";
 import { NewContextForm } from "./new-context-form";
+import { DeleteContextButton } from "./delete-context-button";
 import { setActiveContext } from "./actions";
 
 interface ContextRow {
@@ -146,6 +147,12 @@ export default async function ContextsPage() {
                   >
                     {(tokenCountByContext.get(context.id) ?? 0).toLocaleString("de-DE")} Tokens
                   </span>
+                  {itemCount === 0 && (
+                    <DeleteContextButton
+                      contextId={context.id}
+                      contextName={context.name}
+                    />
+                  )}
                 </li>
               );
             })}
