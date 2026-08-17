@@ -109,6 +109,7 @@ export async function POST(request: Request) {
   let contextName: string | undefined;
   let occurredFrom: string | undefined;
   let occurredTo: string | undefined;
+  let scope: "active_context" | "context_space" = "active_context";
   try {
     const body = await request.json();
     query = (body?.query as string | undefined)?.trim();
@@ -118,6 +119,7 @@ export async function POST(request: Request) {
     occurredFrom =
       (body?.occurred_from as string | undefined)?.trim() || undefined;
     occurredTo = (body?.occurred_to as string | undefined)?.trim() || undefined;
+    if (body?.scope === "context_space") scope = "context_space";
   } catch {
     return corsJson({ error: "Invalid JSON body" }, { status: 400 });
   }
@@ -143,7 +145,16 @@ export async function POST(request: Request) {
     let contextId: string | undefined;
     let scopedContextName: string | undefined;
     let isActiveContextScope = false;
-    if (contextName) {
+    // scope: "context_space" is an explicit request from the model for a
+    // cross-cutting search (e.g. "In welchen Projekten arbeitet Person A?"
+    // — see retrieve_memory's tool description in api/realtime-token/
+    // route.ts) — skip context resolution entirely rather than trying a
+    // scoped search first, per that feature's spec: immediate, full-space
+    // search, no prior local round. contextId stays undefined below, which
+    // already makes retrieve() search the whole Context Space directly.
+    if (scope === "context_space") {
+      // no-op: contextId/scopedContextName/isActiveContextScope stay unset
+    } else if (contextName) {
       const resolution = await resolveContext(
         supabase,
         contextSpaceId,
@@ -239,6 +250,11 @@ export async function POST(request: Request) {
         context_id: contextId,
         context_name: scopedContextName,
         fell_back_to_context_space: fellBackToContextSpace,
+        // Distinguishes "context_space because no active context is set"
+        // from "context_space because the model explicitly asked for a
+        // cross-cutting search" — both produce mode: "context_space"
+        // above, but only the latter has requested_scope set.
+        requested_scope: scope,
       },
     });
   } catch (error) {

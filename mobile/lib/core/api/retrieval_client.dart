@@ -30,10 +30,13 @@ class RetrievalClient {
   static const _requestTimeout = Duration(seconds: 15);
   static const _webSearchTimeout = Duration(seconds: 12);
 
-  /// context_name/memory_type/occurred_from/occurred_to are optional
+  /// context_name/memory_type/occurred_from/occurred_to/scope are optional
   /// Metadatenfilter (see the retrieve_memory function tool's parameters in
   /// web/src/app/api/realtime-token/route.ts) — only forwarded when set, so
   /// the backend's hybrid retrieval falls back to its unfiltered default.
+  /// scope: "context_space" skips the active-context/context_name scoping
+  /// entirely for an explicit cross-cutting search; unset/"active_context"
+  /// is today's unchanged behavior.
   ///
   /// Returns the full decoded response body, not just `items` — an
   /// ambiguous context_name comes back as `{'items': [], 'ambiguous_context':
@@ -46,6 +49,7 @@ class RetrievalClient {
     String? memoryType,
     String? occurredFrom,
     String? occurredTo,
+    String? scope,
   }) async {
     final session = Supabase.instance.client.auth.currentSession;
     if (session == null) {
@@ -65,6 +69,7 @@ class RetrievalClient {
             if (memoryType != null) 'type': memoryType,
             if (occurredFrom != null) 'occurred_from': occurredFrom,
             if (occurredTo != null) 'occurred_to': occurredTo,
+            if (scope != null) 'scope': scope,
           }),
         )
         .timeout(_requestTimeout);

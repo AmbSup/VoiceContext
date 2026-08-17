@@ -95,6 +95,11 @@ export interface RetrievedMemoryItem {
   similarity: number;
   fts_rank: number;
   relevance_score: number;
+  // Which Kontext(e) this item is linked to (many-to-many, can be empty
+  // for an Inbox item with no link yet) — lets the model attribute a
+  // context_space-wide result to its source, e.g. "Person A taucht sowohl
+  // in Projekt Haus als auch in Projekt Sportstudio auf".
+  context_names: string[];
 }
 
 export interface RetrievedContext {
@@ -176,6 +181,7 @@ interface MemoryItemCandidateRow {
   similarity: number;
   fts_rank: number;
   fused_score: number;
+  context_names: string[];
 }
 
 interface ContextCandidateRow {
@@ -337,6 +343,7 @@ function sourceTokenCount(source: RetrievedSource): number {
           status: source.status,
           confidence: source.confidence,
           occurred_at: source.occurred_at,
+          context_names: source.context_names,
         }
       : source.kind === "segment"
         ? {

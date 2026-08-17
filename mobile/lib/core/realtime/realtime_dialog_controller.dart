@@ -938,6 +938,7 @@ class RealtimeDialogController {
         memoryType: args['memory_type'] as String?,
         occurredFrom: args['occurred_from'] as String?,
         occurredTo: args['occurred_to'] as String?,
+        scope: args['scope'] as String?,
       );
       // Passed through as-is: on an ambiguous context_name this carries
       // 'ambiguous_context' instead of populated 'items' (see
