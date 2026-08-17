@@ -43,3 +43,53 @@ export async function deleteContextMemoryItem(
   revalidatePath("/search");
   return undefined;
 }
+
+export async function deleteContextMemoryItems(
+  contextId: string,
+  memoryItemIds: string[],
+): Promise<string | undefined> {
+  const uniqueIds = [...new Set(memoryItemIds.filter(Boolean))];
+  if (!contextId || uniqueIds.length === 0) {
+    return "Keine Memory-Items ausgewählt";
+  }
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return "Nicht angemeldet";
+
+  const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
+  const { data: items, error: itemsError } = await supabase
+    .from("memory_items")
+    .select("id, memory_context_links!inner(context_id)")
+    .in("id", uniqueIds)
+    .eq("context_space_id", contextSpaceId)
+    .eq("memory_context_links.context_id", contextId);
+
+  if (itemsError) return itemsError.message;
+  const verifiedIds = new Set((items ?? []).map((item) => item.id));
+  if (
+    verifiedIds.size !== uniqueIds.length ||
+    uniqueIds.some((id) => !verifiedIds.has(id))
+  ) {
+    return "Mindestens ein Memory-Item gehört nicht zu diesem Kontext";
+  }
+
+  const { data: deleted, error: deleteError } = await supabase
+    .from("memory_items")
+    .delete()
+    .in("id", uniqueIds)
+    .eq("context_space_id", contextSpaceId)
+    .select("id");
+
+  if (deleteError) return deleteError.message;
+  if ((deleted ?? []).length !== uniqueIds.length) {
+    return "Nicht alle Memory-Items konnten gelöscht werden";
+  }
+
+  revalidatePath(`/contexts/${contextId}`);
+  revalidatePath("/contexts");
+  revalidatePath("/search");
+  return undefined;
+}
