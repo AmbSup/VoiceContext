@@ -367,12 +367,13 @@ export async function POST(request: Request) {
           },
           output: {
             format: { type: "audio/pcm", rate: 24000 },
-            // "alloy" read German with a noticeable English accent (live
-            // user report). marin/cedar are OpenAI's recommended voices for
-            // gpt-realtime-2.1 — trying marin first ("professional and
-            // clear" per OpenAI's own description); switch to "cedar" here
-            // if it turns out no better.
-            voice: "marin",
+            // "alloy" and "marin" both read German with a noticeable
+            // English accent (live user reports). "cedar" is the other
+            // OpenAI-recommended voice for gpt-realtime-2.1, trying it
+            // next. Note: ChatGPT-app voices like Arbor/Cove are NOT valid
+            // here — the Realtime API only accepts alloy/ash/ballad/coral/
+            // echo/sage/shimmer/verse/marin/cedar.
+            voice: "cedar",
           },
         },
         tools: TOOLS,
