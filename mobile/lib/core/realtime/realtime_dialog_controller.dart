@@ -718,6 +718,14 @@ class RealtimeDialogController {
     // normal dialog-state filler turn. In that case, defer the completed
     // tool call, speak the filler now, then execute the saved call as soon as
     // the filler response finishes.
+    //
+    // TODO: gpt-realtime-2.1's prompt now has a "# Preambles" section
+    // asking the model to speak a short commentary-channel line before a
+    // slow tool call natively. Once that's confirmed reliable across real
+    // sessions (same conversation scenarios, before/after), this
+    // client-side deferral can likely be removed — see
+    // web/src/lib/realtime-instructions.ts. Left in place for now so the
+    // two don't get compared with only one implemented.
     if (_deferredWebToolResponse != null && functionCalls.isEmpty) {
       final deferredResponse = _deferredWebToolResponse!;
       _deferredWebToolResponse = null;
