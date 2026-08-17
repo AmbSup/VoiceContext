@@ -9,6 +9,7 @@ import {
   formatMemoryItemType,
   memoryItemStatusClasses,
 } from "@/lib/memory-items";
+import { DeleteMemoryItemButton } from "./delete-memory-item-button";
 
 interface MemoryItemRow {
   id: string;
@@ -114,6 +115,10 @@ export default async function ContextDetailPage({
                     <span className="ml-auto text-xs text-zinc-400 dark:text-zinc-500">
                       {new Date(item.occurred_at).toLocaleString("de-DE")}
                     </span>
+                    <DeleteMemoryItemButton
+                      contextId={contextId}
+                      memoryItemId={item.id}
+                    />
                   </div>
                   <p className="mt-2 text-sm text-black dark:text-zinc-50">
                     {item.content}
