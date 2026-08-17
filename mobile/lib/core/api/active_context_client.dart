@@ -67,6 +67,14 @@ class ActiveContextClient {
     );
   }
 
+  /// Deselects the default context entirely (no row = no default, see
+  /// api/active-context/route.ts's "clear" action) — used by the Kontext
+  /// tab's direct-tap picker, as opposed to [confirm]/[resolve] which back
+  /// the voice-driven propose/confirm flow.
+  Future<void> clear() async {
+    await _post({'action': 'clear'});
+  }
+
   Future<Map<String, dynamic>> _post(Map<String, dynamic> body) async {
     final session = Supabase.instance.client.auth.currentSession;
     if (session == null) {

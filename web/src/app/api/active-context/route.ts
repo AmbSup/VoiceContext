@@ -96,5 +96,21 @@ export async function POST(request: Request) {
     return corsJson({ active_context: context });
   }
 
+  // Deselects the default context entirely — active_context_preferences has
+  // no nullable/sentinel "no default" value (default_context_id is NOT
+  // NULL), so "no default" is represented purely by the row's absence,
+  // same as before any preference was ever set. getConfirmedActiveContext
+  // already treats "no row" as no active context (see its "kein
+  // Standardkontext bestätigt" branch in realtime-instructions.ts).
+  if (action === "clear") {
+    const { error: deleteError } = await supabase
+      .from("active_context_preferences")
+      .delete()
+      .eq("context_space_id", contextSpaceId)
+      .eq("user_id", user.id);
+    if (deleteError) throw deleteError;
+    return corsJson({ active_context: null });
+  }
+
   return corsJson({ error: "Unsupported action" }, { status: 400 });
 }

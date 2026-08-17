@@ -37,6 +37,7 @@ class _MainShellState extends State<MainShell> {
   final _controller = RealtimeDialogController();
   final _sessionRepository = DialogSessionRepository();
   final _sourcesClient = ContextSourcesClient();
+  final _activeContextClient = ActiveContextClient();
   final _dialogProcessingClient = DialogProcessingClient();
   StreamSubscription<String>? _dialogStateSubscription;
   StreamSubscription<String>? _liveTranscriptSubscription;
@@ -137,6 +138,32 @@ class _MainShellState extends State<MainShell> {
       }
     } finally {
       if (mounted) setState(() => _sourcesLoading = false);
+    }
+  }
+
+  /// Direct-tap counterpart to the voice-only propose/confirm flow (see
+  /// RealtimeDialogController's propose_active_context_switch/
+  /// confirm_active_context_switch) — the Kontext tab's default-context
+  /// picker (KontextTab.onChangeDefaultContext) calls this straight away,
+  /// no spoken-name ambiguity to resolve first. contextId null clears the
+  /// default entirely (ActiveContextClient.clear).
+  Future<void> _changeDefaultContext(String? contextId) async {
+    try {
+      if (contextId == null) {
+        await _activeContextClient.clear();
+      } else {
+        await _activeContextClient.confirm(contextId);
+      }
+      // The active_context source id/label in _sources only reflects
+      // whatever was true at the last fetch — reload so the picker and the
+      // "STANDARDKONTEXT" row show the new state immediately.
+      await _loadSources();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Standardkontext ändern fehlgeschlagen: $error')),
+        );
+      }
     }
   }
 
@@ -455,6 +482,7 @@ class _MainShellState extends State<MainShell> {
                 }
               }),
               onApply: _applyContextUpdate,
+              onChangeDefaultContext: _changeDefaultContext,
             )
           else
             const SizedBox.shrink(),

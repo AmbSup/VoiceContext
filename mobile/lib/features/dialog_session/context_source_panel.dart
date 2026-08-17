@@ -21,12 +21,17 @@ class ContextSourcePanel extends StatelessWidget {
     required this.enabled,
     required this.tokenBudget,
     required this.onToggle,
+    this.onChangeDefault,
   });
 
   final List<ContextSource> sources;
   final Map<String, bool> enabled;
   final int tokenBudget;
   final ValueChanged<String> onToggle;
+  /// Opens the default-context picker (change or clear). Null hides the
+  /// action — the compact inline panel embedded in SessionTab doesn't offer
+  /// this, only the full Kontext tab does.
+  final VoidCallback? onChangeDefault;
 
   static const _kindOrder = ['active_context', 'context', 'document', 'session'];
   static const _kindLabels = {
@@ -105,10 +110,16 @@ class ContextSourcePanel extends StatelessWidget {
   }
 
   List<Widget> _buildSection(String kind, List<ContextSource> kindSources) {
-    if (kindSources.isEmpty) return const [];
+    final isActiveContextSection = kind == 'active_context';
+    // Every other section simply disappears when empty; the active-context
+    // section stays visible even with zero sources so "kein Standardkontext
+    // gesetzt" is a state the user can see and act on, not just silence.
+    if (kindSources.isEmpty && !isActiveContextSection) return const [];
     // The active-context source is pinned: always on, no toggle shown —
     // mirrors realtime-token/route.ts always including it server-side.
-    final locked = kind == 'active_context';
+    // Which context IS the default is changed via onChangeDefault instead,
+    // not by toggling it off here.
+    final locked = isActiveContextSection;
     return [
       Padding(
         padding: const EdgeInsets.fromLTRB(20, 14, 20, 8),
@@ -124,7 +135,20 @@ class ContextSourcePanel extends StatelessWidget {
                 color: ModernistColors.text,
               ),
             ),
-            if (!locked)
+            if (isActiveContextSection && onChangeDefault != null)
+              InkWell(
+                onTap: onChangeDefault,
+                child: Text(
+                  kindSources.isEmpty ? 'FESTLEGEN' : 'ÄNDERN',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.6,
+                    color: ModernistColors.accentDark,
+                  ),
+                ),
+              )
+            else if (!locked)
               const Text(
                 'TIPPEN ZUM SCHALTEN',
                 style: TextStyle(fontSize: 10, color: ModernistColors.textMuted),
@@ -139,20 +163,28 @@ class ContextSourcePanel extends StatelessWidget {
             bottom: BorderSide(color: ModernistColors.divider, width: 2),
           ),
         ),
-        child: Column(
-          children: [
-            for (var i = 0; i < kindSources.length; i++) ...[
-              _SourceRow(
-                source: kindSources[i],
-                on: locked ? true : (enabled[kindSources[i].id] ?? false),
-                locked: locked,
-                onToggle: locked ? null : () => onToggle(kindSources[i].id),
+        child: kindSources.isEmpty
+            ? const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                child: Text(
+                  'Kein Standardkontext gesetzt.',
+                  style: TextStyle(fontSize: 13, color: ModernistColors.textMuted),
+                ),
+              )
+            : Column(
+                children: [
+                  for (var i = 0; i < kindSources.length; i++) ...[
+                    _SourceRow(
+                      source: kindSources[i],
+                      on: locked ? true : (enabled[kindSources[i].id] ?? false),
+                      locked: locked,
+                      onToggle: locked ? null : () => onToggle(kindSources[i].id),
+                    ),
+                    if (i < kindSources.length - 1)
+                      const Divider(height: 1, thickness: 1, color: ModernistColors.dividerLight),
+                  ],
+                ],
               ),
-              if (i < kindSources.length - 1)
-                const Divider(height: 1, thickness: 1, color: ModernistColors.dividerLight),
-            ],
-          ],
-        ),
       ),
     ];
   }
