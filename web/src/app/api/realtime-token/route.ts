@@ -367,7 +367,12 @@ export async function POST(request: Request) {
           },
           output: {
             format: { type: "audio/pcm", rate: 24000 },
-            voice: "alloy",
+            // "alloy" read German with a noticeable English accent (live
+            // user report). marin/cedar are OpenAI's recommended voices for
+            // gpt-realtime-2.1 — trying marin first ("professional and
+            // clear" per OpenAI's own description); switch to "cedar" here
+            // if it turns out no better.
+            voice: "marin",
           },
         },
         tools: TOOLS,
