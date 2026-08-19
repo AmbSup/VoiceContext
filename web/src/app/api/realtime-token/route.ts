@@ -285,10 +285,40 @@ export async function POST(request: Request) {
 
   const { data: profile } = await supabase
     .from("profiles")
-    .select("display_name")
+    .select("display_name, conversation_style")
     .eq("id", user.id)
     .maybeSingle();
   const displayName = profile?.display_name?.trim() || null;
+  const conversationStyle = profile?.conversation_style ?? "neutral";
+
+  // Rule #4 (smarter session opener): the greeting references the user's
+  // own still-open Aufgaben/Fragen from the Ergebnisse screen, not just a
+  // generic "was steht an" — oldest first, since that's most likely to
+  // have been forgotten. Best-effort: a lookup failure just falls back to
+  // the plain greeting, same pattern as the context-sources try/catch in
+  // realtime-instructions.ts.
+  let openResultsCount = 0;
+  let openResultsTitle: string | null = null;
+  try {
+    // `count: "exact"` reports the total match count regardless of the
+    // `.limit(1)` below — one round trip for both the badge number and the
+    // single oldest title to mention by name.
+    const { data: openResults, count, error: openResultsError } =
+      await supabase
+        .from("saved_results")
+        .select("title", { count: "exact" })
+        .eq("context_space_id", contextSpaceId)
+        .eq("created_by", user.id)
+        .in("kind", ["aufgabe", "frage"])
+        .eq("status", "offen")
+        .order("created_at", { ascending: true })
+        .limit(1);
+    if (openResultsError) throw openResultsError;
+    openResultsTitle = openResults?.[0]?.title ?? null;
+    openResultsCount = count ?? 0;
+  } catch (error) {
+    console.error("Failed to load open saved_results for greeting:", error);
+  }
 
   // Turn-Kontext-Auswahl (mobile): the client optionally sends which
   // sources it enabled before starting this session. No/invalid body falls
@@ -311,6 +341,7 @@ export async function POST(request: Request) {
     userId: user.id,
     enabledSourceIds: requestedSourceIds,
     displayName,
+    conversationStyle,
   });
   timer.mark("build_instructions");
 
@@ -432,6 +463,8 @@ export async function POST(request: Request) {
     expiresAt: expires_at,
     activeContext,
     displayName,
+    openResultsCount,
+    openResultsTitle,
     // Keeps WebRTC signaling on the same regional OpenAI API origin that
     // minted the client secret (for example the configured EU endpoint).
     realtimeUrl: `${baseUrl}/v1/realtime/calls`,

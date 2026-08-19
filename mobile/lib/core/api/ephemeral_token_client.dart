@@ -12,6 +12,8 @@ class RealtimeToken {
     this.realtimeEndpoint,
     this.activeContext,
     this.displayName,
+    this.openResultsCount = 0,
+    this.openResultsTitle,
   });
 
   final String token;
@@ -22,6 +24,13 @@ class RealtimeToken {
   /// The user's `profiles.display_name` (see settings_tab.dart), for the
   /// Realtime session's opening greeting — null if never set.
   final String? displayName;
+
+  /// Count of the user's still-open ("offen") Aufgaben/Fragen from the
+  /// Ergebnisse screen (saved_results), and the oldest one's title — used
+  /// to make the opening greeting reference real pending items instead of
+  /// a generic "was steht an". 0/null when there are none.
+  final int openResultsCount;
+  final String? openResultsTitle;
 }
 
 /// Fetches a short-lived OpenAI Realtime API token from our backend
@@ -81,6 +90,8 @@ class EphemeralTokenClient {
         _ => null,
       },
       displayName: body['displayName'] as String?,
+      openResultsCount: body['openResultsCount'] as int? ?? 0,
+      openResultsTitle: body['openResultsTitle'] as String?,
     );
   }
 }

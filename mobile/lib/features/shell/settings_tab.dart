@@ -11,19 +11,29 @@ class SettingsTab extends StatefulWidget {
   State<SettingsTab> createState() => _SettingsTabState();
 }
 
+// Must match the entities.conversation_style check constraint in
+// 20260819135221_conversation_style.sql and the keys realtime-
+// instructions.ts's CONVERSATION_STYLE_INSTRUCTIONS understands.
+const _conversationStyleLabels = {
+  'neutral': 'Neutral',
+  'coach': 'Coach',
+  'denkpartner': 'Denkpartner',
+};
+
 class _SettingsTabState extends State<SettingsTab> {
   late final _supabase = Supabase.instance.client;
   late final _user = _supabase.auth.currentUser;
   String? _displayName;
+  String _conversationStyle = 'neutral';
   bool _loading = true;
 
   @override
   void initState() {
     super.initState();
-    _loadDisplayName();
+    _loadProfile();
   }
 
-  Future<void> _loadDisplayName() async {
+  Future<void> _loadProfile() async {
     final userId = _user?.id;
     if (userId == null) {
       setState(() => _loading = false);
@@ -31,12 +41,14 @@ class _SettingsTabState extends State<SettingsTab> {
     }
     final row = await _supabase
         .from('profiles')
-        .select('display_name')
+        .select('display_name, conversation_style')
         .eq('id', userId)
         .maybeSingle();
     if (!mounted) return;
     setState(() {
       _displayName = row?['display_name'] as String?;
+      _conversationStyle =
+          row?['conversation_style'] as String? ?? 'neutral';
       _loading = false;
     });
   }
@@ -75,6 +87,35 @@ class _SettingsTabState extends State<SettingsTab> {
         .eq('id', userId);
     if (!mounted) return;
     setState(() => _displayName = result.isEmpty ? null : result);
+  }
+
+  Future<void> _editConversationStyle() async {
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('Gesprächsstil'),
+        children: _conversationStyleLabels.entries
+            .map(
+              (entry) => RadioListTile<String>(
+                value: entry.key,
+                groupValue: _conversationStyle,
+                title: Text(entry.value),
+                onChanged: (value) => Navigator.of(context).pop(value),
+              ),
+            )
+            .toList(),
+      ),
+    );
+    if (result == null || result == _conversationStyle) return;
+
+    final userId = _user?.id;
+    if (userId == null) return;
+    await _supabase
+        .from('profiles')
+        .update({'conversation_style': result})
+        .eq('id', userId);
+    if (!mounted) return;
+    setState(() => _conversationStyle = result);
   }
 
   @override
@@ -178,6 +219,16 @@ class _SettingsTabState extends State<SettingsTab> {
               letterSpacing: 0.8,
               color: ModernistColors.textMuted,
             ),
+          ),
+          const SizedBox(height: 12),
+          // Gesprächsstil — steuert Ton und Nachfrage-Häufigkeit der
+          // Live-Dialog-KI, siehe realtime-instructions.ts
+          // CONVERSATION_STYLE_INSTRUCTIONS.
+          _SettingItem(
+            icon: Icons.forum,
+            label: 'Gesprächsstil',
+            value: _conversationStyleLabels[_conversationStyle] ?? 'Neutral',
+            onTap: _editConversationStyle,
           ),
           const SizedBox(height: 12),
           // Sprache

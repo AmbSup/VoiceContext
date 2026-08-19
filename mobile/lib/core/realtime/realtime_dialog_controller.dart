@@ -115,6 +115,9 @@ class RealtimeDialogController {
   MediaStream? _remoteStream;
   Completer<void>? _dataChannelOpened;
   Timer? _audioLevelTimer;
+  Timer? _idleCheckTimer;
+  DateTime? _lastUserActivityAt;
+  bool _idleWarningSent = false;
   Timer? _rateLimitRetryTimer;
   RealtimeConnectionState _state = RealtimeConnectionState.idle;
   bool _disposed = false;
@@ -127,6 +130,8 @@ class RealtimeDialogController {
   int _consecutiveListeningTurns = 0;
   ActiveContext? _activeContext;
   String? _userDisplayName;
+  int _openResultsCount = 0;
+  String? _openResultsTitle;
   ActiveContext? _pendingActiveContext;
   bool _pendingActiveContextHasUserReply = false;
   final _transcriptBuffer = StringBuffer();
@@ -243,6 +248,8 @@ class RealtimeDialogController {
       );
       _setActiveContext(realtimeToken.activeContext);
       _userDisplayName = realtimeToken.displayName;
+      _openResultsCount = realtimeToken.openResultsCount;
+      _openResultsTitle = realtimeToken.openResultsTitle;
       _pendingActiveContext = null;
       _pendingActiveContextHasUserReply = false;
       if (realtimeToken.expiresAt.isBefore(DateTime.now())) {
@@ -320,6 +327,12 @@ class RealtimeDialogController {
         const Duration(milliseconds: 100),
         (_) => unawaited(_pollAudioLevel()),
       );
+      _lastUserActivityAt = DateTime.now();
+      _idleWarningSent = false;
+      _idleCheckTimer = Timer.periodic(
+        const Duration(seconds: 5),
+        (_) => unawaited(_checkIdle()),
+      );
     } catch (_) {
       _setState(RealtimeConnectionState.failed);
       await _closeRealtimeResources();
@@ -336,9 +349,23 @@ class RealtimeDialogController {
             ? 'Guten Tag'
             : 'Guten Abend';
     final name = _userDisplayName;
-    final line = name == null || name.isEmpty
-        ? '$greeting. Was steht heute an?'
-        : '$greeting, $name. Was steht heute an?';
+    final namePrefix = name == null || name.isEmpty ? '' : ', $name';
+    // Rule #4 (smarter opener): mention a real pending Aufgabe/Frage from
+    // the Ergebnisse screen by name instead of a generic "was steht an" —
+    // most useful precisely because the user is unlikely to remember it
+    // unprompted. Falls back to the plain opener when there are none.
+    final openTitle = _openResultsTitle;
+    final String tail;
+    if (_openResultsCount <= 0 || openTitle == null) {
+      tail = 'Was steht heute an?';
+    } else if (_openResultsCount == 1) {
+      tail = 'Du hast noch eine offene Sache: "$openTitle". '
+          'Wollen wir damit starten, oder was steht sonst an?';
+    } else {
+      tail = 'Du hast noch $_openResultsCount offene Sachen, unter anderem '
+          '"$openTitle". Was möchtest du zuerst angehen?';
+    }
+    final line = '$greeting$namePrefix. $tail';
 
     await _requestResponse(
       response: {
@@ -349,6 +376,39 @@ class RealtimeDialogController {
         'tool_choice': 'none',
       },
     );
+  }
+
+  // How long the user can stay silent before a single "Bist du noch da?"
+  // check-in, and how much longer after that before the session ends
+  // itself — mirrors CONTEXT.md's "Dialog-Session ... explizit durch
+  // Button-Druck gestartet und beendet": that's about starting/stopping
+  // intentionally, not about leaving a live microphone open unattended
+  // once the user has clearly stepped away.
+  static const _idleWarningThreshold = Duration(seconds: 45);
+  static const _idleEndThreshold = Duration(seconds: 75);
+
+  Future<void> _checkIdle() async {
+    if (_state != RealtimeConnectionState.connected) return;
+    final lastActivity = _lastUserActivityAt;
+    if (lastActivity == null) return;
+    final silence = DateTime.now().difference(lastActivity);
+
+    if (_idleWarningSent && silence >= _idleEndThreshold) {
+      await endSession();
+      return;
+    }
+    if (!_idleWarningSent && silence >= _idleWarningThreshold) {
+      _idleWarningSent = true;
+      await _requestResponse(
+        response: {
+          'input': <dynamic>[],
+          'instructions':
+              'Sag jetzt ausschließlich: "Bist du noch da?" '
+                  'Keine Funktionsaufrufe und nichts anderes.',
+          'tool_choice': 'none',
+        },
+      );
+    }
   }
 
   /// Starts a Realtime response and remembers the exact request so a
@@ -494,6 +554,12 @@ class RealtimeDialogController {
 
   void _handleThinkingState(Map<String, dynamic> event) {
     switch (event['type']) {
+      case 'input_audio_buffer.speech_started':
+        // Only real evidence the user is present resets the idle clock —
+        // not our own greeting/idle-check speaking, which would otherwise
+        // mask exactly the silence this is meant to detect.
+        _lastUserActivityAt = DateTime.now();
+        _idleWarningSent = false;
       case 'input_audio_buffer.speech_stopped':
         _setThinking(true);
         _pendingTurnSpeechStoppedAt = DateTime.now();
@@ -1184,6 +1250,10 @@ class RealtimeDialogController {
 
     _audioLevelTimer?.cancel();
     _audioLevelTimer = null;
+    _idleCheckTimer?.cancel();
+    _idleCheckTimer = null;
+    _lastUserActivityAt = null;
+    _idleWarningSent = false;
     _rateLimitRetryTimer?.cancel();
     _rateLimitRetryTimer = null;
     _realtimeRateLimitRetryAttempts = 0;
