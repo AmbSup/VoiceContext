@@ -285,11 +285,15 @@ export async function POST(request: Request) {
 
   const { data: profile } = await supabase
     .from("profiles")
-    .select("display_name, conversation_style")
+    .select("display_name, conversation_style, age, profession, life_goals, education")
     .eq("id", user.id)
     .maybeSingle();
   const displayName = profile?.display_name?.trim() || null;
   const conversationStyle = profile?.conversation_style ?? "neutral";
+  const age = profile?.age?.trim() || null;
+  const profession = profile?.profession?.trim() || null;
+  const lifeGoals = profile?.life_goals?.trim() || null;
+  const education = profile?.education?.trim() || null;
 
   // Rule #4 (smarter session opener): the greeting references the user's
   // own still-open Aufgaben/Fragen from the Ergebnisse screen, not just a
@@ -342,6 +346,10 @@ export async function POST(request: Request) {
     enabledSourceIds: requestedSourceIds,
     displayName,
     conversationStyle,
+    age,
+    profession,
+    lifeGoals,
+    education,
   });
   timer.mark("build_instructions");
 

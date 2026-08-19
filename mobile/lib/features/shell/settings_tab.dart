@@ -25,6 +25,15 @@ class _SettingsTabState extends State<SettingsTab> {
   late final _user = _supabase.auth.currentUser;
   String? _displayName;
   String _conversationStyle = 'neutral';
+  // "About me" fields (profiles.age/profession/life_goals/education) — free
+  // text like display_name, no fixed default. `_lifeGoals` here mirrors the
+  // column name in web/src/lib/short-term-memory.ts's unrelated
+  // SessionMemoryNote.goals only in the English word "goal"; they are
+  // different concepts (persistent user-edited trait vs. AI session note).
+  String? _age;
+  String? _profession;
+  String? _lifeGoals;
+  String? _education;
   bool _loading = true;
 
   @override
@@ -41,7 +50,9 @@ class _SettingsTabState extends State<SettingsTab> {
     }
     final row = await _supabase
         .from('profiles')
-        .select('display_name, conversation_style')
+        .select(
+          'display_name, conversation_style, age, profession, life_goals, education',
+        )
         .eq('id', userId)
         .maybeSingle();
     if (!mounted) return;
@@ -49,6 +60,10 @@ class _SettingsTabState extends State<SettingsTab> {
       _displayName = row?['display_name'] as String?;
       _conversationStyle =
           row?['conversation_style'] as String? ?? 'neutral';
+      _age = row?['age'] as String?;
+      _profession = row?['profession'] as String?;
+      _lifeGoals = row?['life_goals'] as String?;
+      _education = row?['education'] as String?;
       _loading = false;
     });
   }
@@ -116,6 +131,60 @@ class _SettingsTabState extends State<SettingsTab> {
         .eq('id', userId);
     if (!mounted) return;
     setState(() => _conversationStyle = result);
+  }
+
+  /// Generic free-text edit dialog for a single `profiles` text column —
+  /// used by the four "about me" fields below. `_editDisplayName` predates
+  /// this helper and is left as its own method rather than refactored onto
+  /// it, to avoid touching already-working, already-tested code for a
+  /// purely cosmetic dedup.
+  Future<void> _editTextField({
+    required String column,
+    required String title,
+    required String hint,
+    required String? currentValue,
+    required ValueSetter<String?> onSaved,
+    int maxLines = 1,
+  }) async {
+    final controller = TextEditingController(text: currentValue ?? '');
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLines: maxLines,
+          keyboardType:
+              maxLines > 1 ? TextInputType.multiline : TextInputType.text,
+          decoration: InputDecoration(hintText: hint),
+          onSubmitted: maxLines == 1
+              ? (value) => Navigator.of(context).pop(value.trim())
+              : null,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Abbrechen'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(controller.text.trim()),
+            child: const Text('Speichern'),
+          ),
+        ],
+      ),
+    );
+    if (result == null || result == (currentValue ?? '')) return;
+
+    final userId = _user?.id;
+    if (userId == null) return;
+    final valueToStore = result.isEmpty ? null : result;
+    await _supabase
+        .from('profiles')
+        .update({column: valueToStore})
+        .eq('id', userId);
+    if (!mounted) return;
+    setState(() => onSaved(valueToStore));
   }
 
   @override
@@ -261,6 +330,78 @@ class _SettingsTabState extends State<SettingsTab> {
             },
           ),
           const SizedBox(height: 32),
+          // Über mich Sektion — Alter/Beruf/Ziele/Ausbildung fließen als
+          // Hintergrund in die System-Instructions der Live-Dialog-KI ein,
+          // siehe realtime-instructions.ts buildAboutMeInstruction.
+          const Text(
+            'ÜBER MICH',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.8,
+              color: ModernistColors.textMuted,
+            ),
+          ),
+          const SizedBox(height: 12),
+          _SettingItem(
+            icon: Icons.cake,
+            label: 'Alter',
+            value: (_age?.isNotEmpty ?? false) ? _age! : 'Nicht angegeben',
+            onTap: () => _editTextField(
+              column: 'age',
+              title: 'Alter',
+              hint: 'z. B. 34',
+              currentValue: _age,
+              onSaved: (v) => _age = v,
+            ),
+          ),
+          const SizedBox(height: 12),
+          _SettingItem(
+            icon: Icons.work,
+            label: 'Beruf',
+            value: (_profession?.isNotEmpty ?? false)
+                ? _profession!
+                : 'Nicht angegeben',
+            onTap: () => _editTextField(
+              column: 'profession',
+              title: 'Beruf',
+              hint: 'z. B. Softwareentwicklerin',
+              currentValue: _profession,
+              onSaved: (v) => _profession = v,
+            ),
+          ),
+          const SizedBox(height: 12),
+          _SettingItem(
+            icon: Icons.school,
+            label: 'Ausbildung',
+            value: (_education?.isNotEmpty ?? false)
+                ? _education!
+                : 'Nicht angegeben',
+            onTap: () => _editTextField(
+              column: 'education',
+              title: 'Ausbildung',
+              hint: 'z. B. Studium Wirtschaftsinformatik',
+              currentValue: _education,
+              onSaved: (v) => _education = v,
+            ),
+          ),
+          const SizedBox(height: 12),
+          _SettingItem(
+            icon: Icons.flag,
+            label: 'Ziele',
+            value: (_lifeGoals?.isNotEmpty ?? false)
+                ? _lifeGoals!
+                : 'Nicht angegeben',
+            onTap: () => _editTextField(
+              column: 'life_goals',
+              title: 'Ziele',
+              hint: 'z. B. In fünf Jahren selbstständig sein',
+              currentValue: _lifeGoals,
+              onSaved: (v) => _lifeGoals = v,
+              maxLines: 4,
+            ),
+          ),
+          const SizedBox(height: 32),
           // Über Sektion
           const Text(
             'ÜBER',
@@ -362,6 +503,8 @@ class _SettingItem extends StatelessWidget {
                     const SizedBox(height: 4),
                     Text(
                       value,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w500,

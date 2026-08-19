@@ -64,11 +64,37 @@ const CONVERSATION_STYLE_INSTRUCTIONS: Record<string, string> = {
     'Rolle "Denkpartner": Sprich wie ein scharfer, ehrlicher Sparringspartner. Stell gezielte Rückfragen statt nur zuzustimmen, und widersprich sachlich, wenn eine Aussage des Nutzers lückenhaft oder widersprüchlich wirkt, statt es unkommentiert zu lassen. Keine Floskeln, keine künstliche Zustimmung — inhaltlich pointiert, aber weiterhin kurz und gesprochen-natürlich.',
 };
 
+// "About me" background (profiles.age/profession/life_goals/education, set
+// in the mobile Profil tab) — folded into ONE instruction sentence so the
+// Role and Objective section doesn't accumulate four separate one-line
+// asides; the model is told explicitly to use it as background, not to
+// recite it or force it into every turn (same restraint as
+// displayNameInstruction below).
+function buildAboutMeInstruction(
+  age?: string | null,
+  profession?: string | null,
+  education?: string | null,
+  lifeGoals?: string | null,
+): string {
+  const facts: string[] = [];
+  if (age) facts.push(`ist ${age} Jahre alt`);
+  if (profession) facts.push(`arbeitet als ${profession}`);
+  if (education) facts.push(`hat diesen Ausbildungshintergrund: ${education}`);
+  if (lifeGoals) facts.push(`verfolgt aktuell dieses persönliche Ziel: ${lifeGoals}`);
+  if (facts.length === 0) return "";
+
+  return `Hintergrund zum Nutzer: Er/sie ${facts.join("; ")}. Nutze das nur dort, wo es natürlich zum Gespräch passt (z. B. für treffendere Beispiele oder Einordnung) — zähl diese Fakten nicht wie eine Liste auf und erwähne sie nicht von dir aus in jeder Antwort.`;
+}
+
 function buildInstructions(
   activeContextName?: string,
   scopedContextBlock?: string | null,
   displayName?: string | null,
   conversationStyle?: string | null,
+  age?: string | null,
+  profession?: string | null,
+  education?: string | null,
+  lifeGoals?: string | null,
 ): string {
   const displayNameInstruction = displayName
     ? `Der Nutzer heißt ${displayName}. Begrüße ihn/sie beim ersten Antworten dieser Session einmal mit Namen (z. B. "Hallo ${displayName}"), danach nicht bei jeder weiteren Antwort wiederholen.`
@@ -77,6 +103,13 @@ function buildInstructions(
   const conversationStyleInstruction = conversationStyle
     ? (CONVERSATION_STYLE_INSTRUCTIONS[conversationStyle] ?? "")
     : "";
+
+  const aboutMeInstruction = buildAboutMeInstruction(
+    age,
+    profession,
+    education,
+    lifeGoals,
+  );
 
   const activeContextInstruction = activeContextName
     ? `Der bestätigte Standardkontext ist "${activeContextName}". Suche persönliche Informationen standardmäßig zuerst dort. Nennt der Nutzer für eine einzelne Frage eindeutig einen anderen Kontext, verwende diesen als temporären Fokus über context_name, ohne den Standard zu ändern. Ein dauerhafter Wechsel erfolgt ausschließlich über propose_active_context_switch und nach einem späteren eindeutigen Ja über confirm_active_context_switch.`
@@ -91,6 +124,7 @@ Du bist die Live-Dialog-KI der KI Voice Context Engine — einer persönlichen W
 
 ${displayNameInstruction}
 ${conversationStyleInstruction}
+${aboutMeInstruction}
 
 Rufe in jeder Antwort-Runde zuerst IMMER set_dialog_state auf und wähle genau einen der drei Zustände "zuhoeren", "antworten" oder "nachfragen" (siehe Tools und Unclear Audio unten für die Details zu jedem Zustand).
 
@@ -150,6 +184,10 @@ export async function buildRealtimeInstructions(params: {
   enabledSourceIds?: string[];
   displayName?: string | null;
   conversationStyle?: string | null;
+  age?: string | null;
+  profession?: string | null;
+  lifeGoals?: string | null;
+  education?: string | null;
 }): Promise<RealtimeInstructionsResult> {
   const {
     supabase,
@@ -158,6 +196,10 @@ export async function buildRealtimeInstructions(params: {
     enabledSourceIds,
     displayName,
     conversationStyle,
+    age,
+    profession,
+    lifeGoals,
+    education,
   } = params;
 
   let activeContext: { id: string; name: string } | null = null;
@@ -190,6 +232,10 @@ export async function buildRealtimeInstructions(params: {
       scopedContextBlock,
       displayName,
       conversationStyle,
+      age,
+      profession,
+      education,
+      lifeGoals,
     ),
     activeContext,
   };
