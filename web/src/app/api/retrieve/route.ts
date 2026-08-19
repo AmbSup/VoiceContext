@@ -205,11 +205,7 @@ export async function POST(request: Request) {
       mode: "llm",
       timeoutMs: RERANK_TIMEOUT_MS,
     };
-    const retrieve = (
-      filterContextId?: string,
-      useTimer?: PerfTimer,
-      rerank: RerankMode = liveRerank,
-    ) =>
+    const retrieve = (filterContextId?: string, useTimer?: PerfTimer) =>
       hybridRetrieve({
         supabase,
         query,
@@ -224,35 +220,35 @@ export async function POST(request: Request) {
         // Optional, time-boxed: the live voice path is bounded by
         // RetrievalClient's 15s HTTP timeout, so a reranker here must not be
         // allowed to run unbounded on top of the embedding + DB round trips.
-        rerank,
+        rerank: liveRerank,
         timer: useTimer,
       });
     // Timer only passed on the first attempt — hybridRetrieve's phase marks
     // (embedding/rpc_candidates/rerank) would otherwise overwrite themselves
     // on a fallback retry. total_ms still covers both attempts either way.
-    // The confirmed default context is only a useful fast path when it has
-    // literal grounding for the query. Probe it without a model round trip;
-    // if it only yields weak semantic neighbours, search the whole Context
-    // Space once with the fast live reranker. This prevents an unrelated
-    // active context from suppressing the real answer elsewhere.
-    const probeActiveContext = Boolean(contextId && isActiveContextScope);
-    let retrieval = await retrieve(
-      contextId,
-      timer,
-      probeActiveContext ? { mode: "off" } : liveRerank,
-    );
+    //
+    // Both attempts now always rerank (previously the first, active-context
+    // attempt skipped it to save a round trip, and fell back whenever none
+    // of its results had an FTS hit). Production data showed that heuristic
+    // firing on 19 of 29 real calls (65%) — not the rare case it was meant
+    // for. retrieval.ts's DEFAULT_MIN_RELEVANCE comment already documents
+    // why: for this embedding model on short German facts, a genuinely
+    // correct match can score as low as 0.363 similarity with zero lexical
+    // overlap ("simple" FTS has no stemming, "wohne" never matches "lebt").
+    // "No FTS hit" is therefore not a reliable "this was wrong" signal, and
+    // using it as one meant most active-context calls paid for a full,
+    // redundant second hybridRetrieve (embedding + 4 RPCs + rerank) even
+    // when the first attempt already had the right answer. Reranking the
+    // first attempt too costs one extra LLM call on every request, but
+    // trusted relevance_score (see the "trusted on its own against
+    // minScore" comment in retrieval.ts) replaces the unreliable proxy —
+    // net latency win given the fallback was firing on most requests.
+    let retrieval = await retrieve(contextId, timer);
     let fellBackToContextSpace = false;
     // Falls back for both scope kinds now — an explicit context_name is
     // still tried first (respects a real user-stated focus), but an empty
     // result there no longer dead-ends the turn; see the comment above.
-    const activeContextHasLexicalHit = retrieval.sources.some(
-      (source) => source.fts_rank > 0,
-    );
-    if (
-      contextId &&
-      (retrieval.sources.length === 0 ||
-        (isActiveContextScope && !activeContextHasLexicalHit))
-    ) {
+    if (contextId && retrieval.sources.length === 0) {
       retrieval = await retrieve();
       timer.mark("fallback_retrieve");
       fellBackToContextSpace = true;
