@@ -207,6 +207,54 @@ export async function resolveMemoryConflict(
   return undefined;
 }
 
+const ENTITY_MERGE_RESOLUTIONS = ["merge", "keep_separate"] as const;
+type EntityMergeResolution = (typeof ENTITY_MERGE_RESOLUTIONS)[number];
+
+interface ResolveEntityMergeSuggestionRpcResult {
+  result_status: "ok" | "error";
+  result_message: string | null;
+}
+
+// Delegates to the resolve_entity_merge_suggestion SQL RPC
+// (20260818090000_entity_merge_suggestions.sql) for the same reason as
+// resolveMemoryConflict above: it row-locks the suggestion and both
+// entities inside one transaction, so a double-click can't apply the same
+// merge twice and a mid-sequence failure can't leave entities.merged_
+// into_entity_id and the suggestion's status out of sync.
+export async function resolveEntityMergeSuggestion(
+  _state: string | undefined,
+  formData: FormData,
+) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return "Nicht angemeldet";
+
+  const suggestionId = String(formData.get("suggestion_id") ?? "");
+  const resolution = String(formData.get("resolution") ?? "");
+  if (!suggestionId) return "Vorschlag fehlt";
+  if (
+    !ENTITY_MERGE_RESOLUTIONS.includes(resolution as EntityMergeResolution)
+  ) {
+    return "Ungültige Auswahl";
+  }
+
+  const { data, error } = await supabase
+    .rpc("resolve_entity_merge_suggestion", {
+      p_suggestion_id: suggestionId,
+      p_resolution: resolution,
+    })
+    .single<ResolveEntityMergeSuggestionRpcResult>();
+  if (error) return error.message;
+  if (data?.result_status === "error") {
+    return data.result_message ?? "Vorschlag konnte nicht bearbeitet werden";
+  }
+
+  revalidatePath("/inbox");
+  return undefined;
+}
+
 export async function dismissContextPool(
   _state: string | undefined,
   formData: FormData,

@@ -3,6 +3,7 @@ import Link from "next/link";
 const LINKS = [
   { href: "/", label: "Übersicht", icon: "⌂" },
   { href: "/contexts", label: "Kontexte", icon: "◫" },
+  { href: "/entities", label: "Entitäten", icon: "☺" },
   { href: "/capture", label: "Erfassen", icon: "+" },
   { href: "/inbox", label: "Inbox", icon: "↓" },
   { href: "/search", label: "Suche", icon: "⌕" },

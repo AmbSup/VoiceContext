@@ -216,6 +216,7 @@ export async function uploadDocument(
     segmentsCreated: 0,
     memoryItemsCreated: 0,
     contextLinksCreated: 0,
+    entityLinksCreated: 0,
     supersededCount: 0,
     flaggedForReviewCount: 0,
   };
@@ -243,6 +244,7 @@ export async function uploadDocument(
       result.segmentsCreated += chunkResult.segmentsCreated;
       result.memoryItemsCreated += chunkResult.memoryItemsCreated;
       result.contextLinksCreated += chunkResult.contextLinksCreated;
+      result.entityLinksCreated += chunkResult.entityLinksCreated;
       result.supersededCount += chunkResult.supersededCount;
       result.flaggedForReviewCount += chunkResult.flaggedForReviewCount;
     }

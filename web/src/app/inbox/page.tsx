@@ -11,6 +11,7 @@ import {
 import { AssignContextForm } from "./assign-context-form";
 import { ContextPoolCard } from "./context-pool-card";
 import { ConflictReviewCard } from "./conflict-review-card";
+import { EntityMergeSuggestionCard } from "./entity-merge-suggestion-card";
 import { suggestContextPools } from "@/lib/context-suggestions";
 import { DeleteMemoryItemButton } from "./delete-memory-item-button";
 
@@ -32,6 +33,19 @@ interface ConflictReviewRow {
   confidence: string;
 }
 
+interface EntityMergeSuggestionRow {
+  id: string;
+  source_entity_id: string;
+  target_entity_id: string;
+  similarity: number;
+}
+
+interface EntityRow {
+  id: string;
+  name: string;
+  type: string;
+}
+
 export default async function InboxPage() {
   const supabase = await createClient();
   const {
@@ -49,6 +63,8 @@ export default async function InboxPage() {
     { data: contexts },
     { data: dismissedPoolItems },
     { data: conflictReviews },
+    { data: entityMergeSuggestions },
+    { data: entities },
   ] = await Promise.all([
     supabase
       .from("memory_items")
@@ -74,6 +90,16 @@ export default async function InboxPage() {
       .eq("context_space_id", contextSpaceId)
       .eq("status", "offen")
       .order("created_at", { ascending: false }),
+    supabase
+      .from("entity_merge_suggestions")
+      .select("id, source_entity_id, target_entity_id, similarity")
+      .eq("context_space_id", contextSpaceId)
+      .eq("status", "offen")
+      .order("created_at", { ascending: false }),
+    supabase
+      .from("entities")
+      .select("id, name, type")
+      .eq("context_space_id", contextSpaceId),
   ]);
 
   // Inbox = Memory-Items ohne jede Kontext-Zuordnung (siehe CONTEXT.md
@@ -137,6 +163,32 @@ export default async function InboxPage() {
       } => entry.newItem !== undefined && entry.existingItem !== undefined,
     );
 
+  // Both sides of a merge suggestion are looked up from the same entities
+  // fetch above (whole space) rather than a nested select — entities has
+  // two foreign keys into itself (source/target), which PostgREST can't
+  // embed unambiguously in one query, same reasoning as the memory-item
+  // lookup for conflict reviews above.
+  const entityById = new Map(
+    ((entities ?? []) as EntityRow[]).map((entity) => [entity.id, entity]),
+  );
+  const resolvedEntityMergeSuggestions = (
+    (entityMergeSuggestions ?? []) as EntityMergeSuggestionRow[]
+  )
+    .map((suggestion) => ({
+      suggestion,
+      sourceEntity: entityById.get(suggestion.source_entity_id),
+      targetEntity: entityById.get(suggestion.target_entity_id),
+    }))
+    .filter(
+      (
+        entry,
+      ): entry is typeof entry & {
+        sourceEntity: EntityRow;
+        targetEntity: EntityRow;
+      } =>
+        entry.sourceEntity !== undefined && entry.targetEntity !== undefined,
+    );
+
   return (
     <>
       <AppNav current="/inbox" />
@@ -174,6 +226,36 @@ export default async function InboxPage() {
                       confidence={review.confidence}
                       newItem={newItem}
                       existingItem={existingItem}
+                    />
+                  ),
+                )}
+              </ul>
+            </section>
+          )}
+
+          {resolvedEntityMergeSuggestions.length > 0 && (
+            <section className="mb-10">
+              <div className="mb-4">
+                <p className="eyebrow">Mögliche gleiche Entitäten</p>
+                <h2 className="mt-2 text-2xl font-semibold">
+                  {resolvedEntityMergeSuggestions.length} Vorschläge zur
+                  Prüfung
+                </h2>
+                <p className="mt-1 text-sm text-zinc-500">
+                  Ähnlich benannte Personen, Organisationen oder Produkte, bei
+                  denen die automatische Erkennung sich nicht sicher genug
+                  war, um sie selbstständig zusammenzuführen.
+                </p>
+              </div>
+              <ul className="grid items-start gap-4 lg:grid-cols-2">
+                {resolvedEntityMergeSuggestions.map(
+                  ({ suggestion, sourceEntity, targetEntity }) => (
+                    <EntityMergeSuggestionCard
+                      key={suggestion.id}
+                      suggestionId={suggestion.id}
+                      similarity={suggestion.similarity}
+                      sourceEntity={sourceEntity}
+                      targetEntity={targetEntity}
                     />
                   ),
                 )}

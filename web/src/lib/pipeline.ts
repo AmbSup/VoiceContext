@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createChatCompletion, createEmbeddings } from "./openai";
 import { truncateToTokens } from "./token-count";
+import { ENTITY_TYPES, resolveOrCreateEntity, type EntityType } from "./entities";
 
 // Segmentation Engine + Memory Extraction + Context Classification, shared
 // by every input path (voice, document, manual text — see CONTEXT.md
@@ -92,6 +93,11 @@ interface ExtractedContextLink {
   confidence: ConfidenceLevel;
 }
 
+interface ExtractedEntity {
+  name: string;
+  type: EntityType;
+}
+
 interface ExtractedMemoryItem {
   type: MemoryItemType;
   content: string;
@@ -103,6 +109,11 @@ interface ExtractedMemoryItem {
   // screen's distinction between user-directed and passively-extracted
   // items (mobile/lib/features/dialog_results).
   user_directed: boolean;
+  // Entities (Person/Organisation/Produkt) mentioned in this item's
+  // content. Extraction only — resolution against existing entities
+  // (exact match + alias list, see web/src/lib/entities.ts) happens in
+  // code after insertion, never guessed by the model itself.
+  entities: ExtractedEntity[];
 }
 
 interface ExtractedSegment {
@@ -147,6 +158,18 @@ const RESPONSE_SCHEMA = {
                   },
                 },
                 user_directed: { type: "boolean" },
+                entities: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      name: { type: "string" },
+                      type: { type: "string", enum: ENTITY_TYPES },
+                    },
+                    required: ["name", "type"],
+                  },
+                },
               },
               required: [
                 "type",
@@ -154,6 +177,7 @@ const RESPONSE_SCHEMA = {
                 "confidence",
                 "context_links",
                 "user_directed",
+                "entities",
               ],
             },
           },
@@ -243,6 +267,7 @@ Regeln:
 - confidence beschreibt deine Sicherheit bei Inhalt und Typ des Items.
 - user_directed=true setzt du AUSSCHLIESSLICH bei einer ausdrücklichen Merk-/Aufgaben-Anweisung des Nutzers (z. B. "merk dir das", "notier das als offenen Punkt", "das ist eine Aufgabe für mich", "schick mir das"). Sonst immer false — auch wenn du dir beim Inhalt sehr sicher bist. Das ist unabhängig von confidence: confidence bewertet, wie sicher du beim Inhalt/Typ bist, user_directed bewertet nur, ob der Nutzer selbst ausdrücklich dazu aufgefordert hat.
 - Kontext-Zuordnung: Schlage einen Eintrag in context_links nur vor, wenn du dir sicher bist, welchem bestehenden Kontext (aus "Bestehende Kontexte") das Item zuzuordnen ist. Gib pro Vorschlag eine eigene confidence an. Im Zweifel: keinen Eintrag hinzufügen (das Item bleibt dann unzugeordnet = Inbox) — rate nicht.
+- entities: Liste der im content tatsächlich genannten Personen, Organisationen oder Produkte, mit Namen genau wie im Text erwähnt (keine Auflösung von Pronomen oder impliziten Bezügen zu Namen, die nicht im Text stehen). type ist person, organisation, produkt oder sonstiges. Leere Liste, wenn keine Entität vorkommt. Die Zuordnung zu bereits bekannten Entitäten übernimmt das System, nicht du.
 - Keine leeren Segmente, keine inhaltsleeren Memory-Items.`;
 }
 
@@ -292,7 +317,8 @@ function isValidExtractionResult(value: unknown): value is ExtractionResult {
         typeof candidate.content === "string" &&
         typeof candidate.confidence === "string" &&
         Array.isArray(candidate.context_links) &&
-        typeof candidate.user_directed === "boolean"
+        typeof candidate.user_directed === "boolean" &&
+        Array.isArray(candidate.entities)
       );
     });
   });
@@ -396,6 +422,7 @@ export interface RunSegmentationPipelineResult {
   segmentsCreated: number;
   memoryItemsCreated: number;
   contextLinksCreated: number;
+  entityLinksCreated: number;
   supersededCount: number;
   // New items whose conflict verdict wasn't confident enough to apply
   // automatically — see memory_conflict_reviews / the "Mögliche Konflikte"
@@ -420,6 +447,7 @@ export async function runSegmentationPipeline({
       segmentsCreated: 0,
       memoryItemsCreated: 0,
       contextLinksCreated: 0,
+      entityLinksCreated: 0,
       supersededCount: 0,
       flaggedForReviewCount: 0,
     };
@@ -461,6 +489,7 @@ export async function runSegmentationPipeline({
     id: string;
     type: MemoryItemType;
     content: string;
+    entities: ExtractedEntity[];
   }[] = [];
   const pendingContextLinks: { memory_item_id: string; context_id: string }[] =
     [];
@@ -511,6 +540,7 @@ export async function runSegmentationPipeline({
         id: memoryItemRow.id,
         type: item.type,
         content: item.content,
+        entities: item.entities,
       });
 
       for (const link of item.context_links) {
@@ -547,6 +577,55 @@ export async function runSegmentationPipeline({
       .insert(pendingContextLinks);
     if (linksError) {
       throw new Error(`Failed to insert context links: ${linksError.message}`);
+    }
+  }
+
+  // Entity resolution — best-effort like the embedding calls below: a
+  // failure here must not roll back the already-inserted memory items, it
+  // just leaves that item's entities unlinked until a later backfill.
+  // Sequential (not concurrent) on purpose so the same entity mentioned
+  // twice in this batch resolves to one row via entityCache instead of
+  // racing to create two.
+  let entityLinksCreated = 0;
+  const pendingEntityLinks: { memory_item_id: string; entity_id: string }[] =
+    [];
+  const entityCache = new Map<string, string>();
+  for (const memoryItem of insertedMemoryItems) {
+    for (const entity of memoryItem.entities) {
+      try {
+        const entityId = await resolveOrCreateEntity(
+          supabase,
+          contextSpaceId,
+          entity.name,
+          entity.type,
+          entityCache,
+          createdBy,
+        );
+        if (entityId) {
+          pendingEntityLinks.push({
+            memory_item_id: memoryItem.id,
+            entity_id: entityId,
+          });
+        }
+      } catch (error) {
+        console.error(
+          `Failed to resolve entity "${entity.name}" for memory item ${memoryItem.id}:`,
+          error,
+        );
+      }
+    }
+  }
+  if (pendingEntityLinks.length > 0) {
+    const { error: entityLinksError } = await supabase
+      .from("memory_entity_links")
+      .insert(pendingEntityLinks);
+    if (entityLinksError) {
+      console.error(
+        `Failed to insert entity links for context space ${contextSpaceId}:`,
+        entityLinksError.message,
+      );
+    } else {
+      entityLinksCreated = pendingEntityLinks.length;
     }
   }
 
@@ -803,6 +882,7 @@ export async function runSegmentationPipeline({
     segmentsCreated,
     memoryItemsCreated: insertedMemoryItems.length,
     contextLinksCreated: pendingContextLinks.length,
+    entityLinksCreated,
     supersededCount,
     flaggedForReviewCount,
   };
