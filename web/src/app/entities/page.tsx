@@ -1,9 +1,11 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
 import { AppNav } from "@/components/app-nav";
 import { ENTITY_TYPES, formatEntityType } from "@/lib/entities";
 import { RevertMergeButton } from "./revert-merge-button";
+import { NewEntityForm } from "./new-entity-form";
 
 interface EntityRow {
   id: string;
@@ -89,6 +91,8 @@ export default async function EntitiesPage() {
             sich hier jederzeit rückgängig machen.
           </p>
 
+          <NewEntityForm />
+
           {canonicalEntities.length === 0 && (
             <p className="text-sm text-zinc-500 dark:text-zinc-500">
               Noch keine Entitäten erkannt.
@@ -113,7 +117,10 @@ export default async function EntitiesPage() {
                         key={entity.id}
                         className="glass-card rounded-2xl p-5"
                       >
-                        <div className="flex flex-wrap items-center gap-3">
+                        <Link
+                          href={`/entities/${entity.id}`}
+                          className="flex flex-wrap items-center gap-3 transition duration-200 hover:translate-x-0.5"
+                        >
                           <p className="min-w-0 flex-1 font-semibold text-black dark:text-zinc-50">
                             {entity.name}
                           </p>
@@ -121,7 +128,7 @@ export default async function EntitiesPage() {
                             {itemCount.toLocaleString("de-DE")}{" "}
                             {itemCount === 1 ? "Memory-Item" : "Memory-Items"}
                           </span>
-                        </div>
+                        </Link>
                         {incomingMerges.length > 0 && (
                           <div className="mt-3 border-t border-black/[.06] pt-3 dark:border-white/[.08]">
                             <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-400">

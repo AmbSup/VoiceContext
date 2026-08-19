@@ -2,6 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
+import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
+import { ENTITY_TYPES, type EntityType } from "@/lib/entities";
 
 interface RevertEntityMergeRpcResult {
   result_status: "ok" | "error";
@@ -29,6 +31,40 @@ export async function revertEntityMerge(
   if (data?.result_status === "error") {
     return data.result_message ?? "Zusammenführung konnte nicht rückgängig gemacht werden";
   }
+
+  revalidatePath("/entities");
+  return undefined;
+}
+
+// Manual creation — everything else in entities.ts only ever creates a row
+// as a side effect of extraction (resolveOrCreateEntity). This is the
+// counterpart for a person/org/product the user knows about but that
+// hasn't come up in a captured conversation or document yet.
+export async function createEntity(
+  _state: string | undefined,
+  formData: FormData,
+): Promise<string | undefined> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return "Nicht angemeldet";
+
+  const name = (formData.get("name") as string | null)?.trim();
+  if (!name) return "Name ist erforderlich";
+  const type = formData.get("type") as string | null;
+  if (!type || !ENTITY_TYPES.includes(type as EntityType)) {
+    return "Ungültiger Typ";
+  }
+
+  const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
+
+  const { error } = await supabase.from("entities").insert({
+    context_space_id: contextSpaceId,
+    name,
+    type,
+  });
+  if (error) return error.message;
 
   revalidatePath("/entities");
   return undefined;
