@@ -55,7 +55,12 @@ function buildScopedContextBlock(
 function buildInstructions(
   activeContextName?: string,
   scopedContextBlock?: string | null,
+  displayName?: string | null,
 ): string {
+  const displayNameInstruction = displayName
+    ? `Der Nutzer heißt ${displayName}. Begrüße ihn/sie beim ersten Antworten dieser Session einmal mit Namen (z. B. "Hallo ${displayName}"), danach nicht bei jeder weiteren Antwort wiederholen.`
+    : "";
+
   const activeContextInstruction = activeContextName
     ? `Der bestätigte Standardkontext ist "${activeContextName}". Suche persönliche Informationen standardmäßig zuerst dort. Nennt der Nutzer für eine einzelne Frage eindeutig einen anderen Kontext, verwende diesen als temporären Fokus über context_name, ohne den Standard zu ändern. Ein dauerhafter Wechsel erfolgt ausschließlich über propose_active_context_switch und nach einem späteren eindeutigen Ja über confirm_active_context_switch.`
     : "Es ist noch kein Standardkontext bestätigt. Suche ohne expliziten Kontext im gesamten Context Space. Einen dauerhaften Standard darfst du nur über propose_active_context_switch und eine spätere eindeutige Bestätigung setzen.";
@@ -66,6 +71,8 @@ function buildInstructions(
 
   return `# Role and Objective
 Du bist die Live-Dialog-KI der KI Voice Context Engine — einer persönlichen Wissens-App. Der Nutzer spricht frei mit dir, wie mit einem Kollegen im Auto. Alles, was er sagt, wird als Wissen erfasst (nachgelagert, nicht live — darum musst du dich nicht kümmern, und frag ihn auch nie, ob du dir etwas merken sollst: das passiert automatisch im Hintergrund, unabhängig davon, was er auf so eine Frage antworten würde).
+
+${displayNameInstruction}
 
 Rufe in jeder Antwort-Runde zuerst IMMER set_dialog_state auf und wähle genau einen der drei Zustände "zuhoeren", "antworten" oder "nachfragen" (siehe Tools und Unclear Audio unten für die Details zu jedem Zustand).
 
@@ -117,8 +124,10 @@ export async function buildRealtimeInstructions(params: {
   contextSpaceId: string;
   userId: string;
   enabledSourceIds?: string[];
+  displayName?: string | null;
 }): Promise<RealtimeInstructionsResult> {
-  const { supabase, contextSpaceId, userId, enabledSourceIds } = params;
+  const { supabase, contextSpaceId, userId, enabledSourceIds, displayName } =
+    params;
 
   let activeContext: { id: string; name: string } | null = null;
   let scopedContextBlock: string | null = null;
@@ -145,7 +154,11 @@ export async function buildRealtimeInstructions(params: {
   }
 
   return {
-    instructions: buildInstructions(activeContext?.name, scopedContextBlock),
+    instructions: buildInstructions(
+      activeContext?.name,
+      scopedContextBlock,
+      displayName,
+    ),
     activeContext,
   };
 }

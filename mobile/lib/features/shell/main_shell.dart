@@ -13,12 +13,13 @@ import '../../core/theme/modernist_colors.dart';
 import '../context_selection/kontext_tab.dart';
 import '../dialog_results/ergebnisse_tab.dart';
 import '../dialog_session/session_tab.dart';
+import 'settings_tab.dart';
 
 // Bumped by hand on every redeploy to the phone so a fresh install is
 // visually confirmable on-screen — see the "USB Debugging"/eventLog mixup
 // where a hot-reloaded build silently ran stale code. Purely a debugging
 // aid, not a real app version.
-const _buildVersion = 'v3';
+const _buildVersion = 'v4';
 
 /// App shell: owns the live-dialog session and everything needed across
 /// tabs (RealtimeDialogController, context sources, results), and hosts the
@@ -493,6 +494,7 @@ class _MainShellState extends State<MainShell> {
             )
           else
             const SizedBox.shrink(),
+          const SettingsTab(),
         ],
       ),
       bottomNavigationBar: Container(
@@ -524,6 +526,7 @@ class _MainShellState extends State<MainShell> {
             BottomNavigationBarItem(icon: Icon(Icons.tune), label: 'KONTEXT'),
             BottomNavigationBarItem(
                 icon: Icon(Icons.checklist), label: 'ERGEBNISSE'),
+            BottomNavigationBarItem(icon: Icon(Icons.person), label: 'PROFIL'),
           ],
         ),
       ),

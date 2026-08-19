@@ -126,6 +126,7 @@ class RealtimeDialogController {
   Map<String, dynamic>? _deferredWebToolResponse;
   int _consecutiveListeningTurns = 0;
   ActiveContext? _activeContext;
+  String? _userDisplayName;
   ActiveContext? _pendingActiveContext;
   bool _pendingActiveContextHasUserReply = false;
   final _transcriptBuffer = StringBuffer();
@@ -241,6 +242,7 @@ class RealtimeDialogController {
         enabledSourceIds: enabledSourceIds,
       );
       _setActiveContext(realtimeToken.activeContext);
+      _userDisplayName = realtimeToken.displayName;
       _pendingActiveContext = null;
       _pendingActiveContextHasUserReply = false;
       if (realtimeToken.expiresAt.isBefore(DateTime.now())) {
@@ -333,12 +335,16 @@ class RealtimeDialogController {
         : hour < 18
             ? 'Guten Tag'
             : 'Guten Abend';
+    final name = _userDisplayName;
+    final line = name == null || name.isEmpty
+        ? '$greeting. Was steht heute an?'
+        : '$greeting, $name. Was steht heute an?';
 
     await _requestResponse(
       response: {
         'input': <dynamic>[],
         'instructions':
-            'Sag jetzt ausschlieÃŸlich: "$greeting. Was steht heute an?" '
+            'Sag jetzt ausschließlich: "$line" '
                 'Keine Funktionsaufrufe und nichts anderes.',
         'tool_choice': 'none',
       },

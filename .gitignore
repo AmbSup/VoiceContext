@@ -15,6 +15,10 @@ mobile/*.iml
 supabase/.branches/
 supabase/.temp/
 
+# Local-only SDKs (Flutter, Android, JDK) used for headless mobile builds —
+# large binaries, never meant to be committed.
+.tooling/
+
 # Claude Code local state — .claude/skills contains machine-local absolute-
 # path symlinks into .agents/skills (which IS tracked); regenerate here via
 # `npx skills add supabase/agent-skills` instead of committing the symlinks.

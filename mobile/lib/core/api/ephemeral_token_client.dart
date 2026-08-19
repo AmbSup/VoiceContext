@@ -11,12 +11,17 @@ class RealtimeToken {
     required this.expiresAt,
     this.realtimeEndpoint,
     this.activeContext,
+    this.displayName,
   });
 
   final String token;
   final DateTime expiresAt;
   final Uri? realtimeEndpoint;
   final ActiveContext? activeContext;
+
+  /// The user's `profiles.display_name` (see settings_tab.dart), for the
+  /// Realtime session's opening greeting — null if never set.
+  final String? displayName;
 }
 
 /// Fetches a short-lived OpenAI Realtime API token from our backend
@@ -75,6 +80,7 @@ class EphemeralTokenClient {
         final Map<String, dynamic> value => ActiveContext.fromJson(value),
         _ => null,
       },
+      displayName: body['displayName'] as String?,
     );
   }
 }

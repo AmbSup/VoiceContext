@@ -283,6 +283,13 @@ export async function POST(request: Request) {
   const contextSpaceId = await getOwnContextSpaceId(supabase, user.id);
   timer.mark("context_space");
 
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("display_name")
+    .eq("id", user.id)
+    .maybeSingle();
+  const displayName = profile?.display_name?.trim() || null;
+
   // Turn-Kontext-Auswahl (mobile): the client optionally sends which
   // sources it enabled before starting this session. No/invalid body falls
   // back to defaultEnabledSourceIds below, so older clients and any caller
@@ -303,6 +310,7 @@ export async function POST(request: Request) {
     contextSpaceId,
     userId: user.id,
     enabledSourceIds: requestedSourceIds,
+    displayName,
   });
   timer.mark("build_instructions");
 
@@ -423,6 +431,7 @@ export async function POST(request: Request) {
     token: value,
     expiresAt: expires_at,
     activeContext,
+    displayName,
     // Keeps WebRTC signaling on the same regional OpenAI API origin that
     // minted the client secret (for example the configured EU endpoint).
     realtimeUrl: `${baseUrl}/v1/realtime/calls`,
