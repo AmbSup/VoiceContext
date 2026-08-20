@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -36,10 +37,23 @@ class RealtimeDialogException implements Exception {
 // search" silently does nothing. Forcing a dedicated response turn with
 // tool_choice: "none" is what actually works: the model is then unable to
 // call a function and says a short natural filler instead.
-const _fillerInstructions =
-    'Sag jetzt ausschließlich einen einzigen kurzen, natürlichen Satz wie '
-    '"Einen Moment bitte" oder "Lass mich kurz nachsehen" — keine weiteren '
-    'Informationen, keine Funktionsaufrufe, nichts anderes.';
+// A pool instead of one or two fixed examples so the same session doesn't
+// keep saying "Einen Moment bitte" every single time a tool call is
+// pending — picked fresh (see _fillerInstructions()) on every filler turn.
+const _fillerPhrases = [
+  'Einen Moment, ich schau nach.',
+  'Ich seh kurz nach.',
+  'Lass mich das kurz prüfen.',
+  'Einen Augenblick, bitte.',
+  'Moment, ich sehe das nach.',
+  'Sekunde, ich schau mal.',
+];
+
+String _fillerInstructions() {
+  final phrase = _fillerPhrases[Random().nextInt(_fillerPhrases.length)];
+  return 'Sag jetzt ausschließlich: "$phrase" Keine weiteren Informationen, '
+      'keine Funktionsaufrufe, nichts anderes.';
+}
 const _continueAfterFillerInstructions =
     'Rufe jetzt die passende Funktion auf (save_result bei einem ausdrücklichen '
     'Auftrag, etwas als E-Mail, Aufgabe oder Frage für später zu speichern; '
@@ -843,7 +857,7 @@ class RealtimeDialogController {
       try {
         await _requestResponse(
           response: {
-            'instructions': _fillerInstructions,
+            'instructions': _fillerInstructions(),
             'tool_choice': 'none',
           },
         );
@@ -885,7 +899,7 @@ class RealtimeDialogController {
             needsFollowUpResponse = true;
             _awaitingFillerTurn = true;
             followUpResponseOverrides = {
-              'instructions': _fillerInstructions,
+              'instructions': _fillerInstructions(),
               'tool_choice': 'none',
             };
           } else if (dialogState == 'antworten' ||
