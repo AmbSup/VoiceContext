@@ -357,6 +357,28 @@ function passesConservativeGate(c: Candidate): boolean {
   return c.fts_rank > 0 || c.similarity >= CONSERVATIVE_VECTOR_THRESHOLD;
 }
 
+// Live-path-only fast lane: skip the ~1.7s LLM rerank call when the top
+// candidate is an unambiguous winner on the COMBINED signal, not just "has
+// a lexical hit somewhere in the pool" — the comment above rerankCandidates
+// warns that alone isn't trustworthy (a lexically-matching but wrong-domain
+// candidate like "PV" can outrank the real answer phrased as
+// "Solarstromanbieter" elsewhere). Requiring a clear fused_score lead over
+// the runner-up means the top candidate wins on semantic+lexical together,
+// a materially stronger bar than a bare lexical hit — but still a real
+// accuracy trade-off versus always verifying via rerank. Only engaged for
+// the live voice path (isLiveRerank in the caller), never web Suche.
+const CONFIDENT_FUSED_SCORE_MARGIN_RATIO = 1.5;
+
+function hasUnambiguousTopCandidate(pool: Candidate[]): boolean {
+  if (pool.length === 0) return false;
+  const [top, runnerUp] = [...pool].sort(
+    (a, b) => b.fused_score - a.fused_score,
+  );
+  if (top.fts_rank <= 0) return false;
+  if (!runnerUp) return true;
+  return top.fused_score >= runnerUp.fused_score * CONFIDENT_FUSED_SCORE_MARGIN_RATIO;
+}
+
 function sourceAuthority(source: RetrievedSource): number {
   if (source.kind === "document_chunk") return 4;
   if (source.kind === "memory_item") {
@@ -552,24 +574,28 @@ export async function hybridRetrieve(params: {
   // "Generator" in another source. Therefore a hit somewhere in the pool
   // must never suppress semantic reranking of the other candidates.
   if (rerank.mode === "llm") {
-    try {
-      const isLiveRerank = rerank.timeoutMs !== undefined;
-      const rerankCandidatesPool = isLiveRerank
-        ? selectLiveRerankCandidates(candidates)
-        : candidates;
-      relevanceById = await rerankCandidates(
-        query,
-        rerankCandidatesPool,
-        userId,
-        rerank.timeoutMs,
-        isLiveRerank ? LIVE_RERANK_MODEL : DEFAULT_RERANK_MODEL,
-        isLiveRerank ? LIVE_RERANK_SERVICE_TIER : undefined,
-      );
-    } catch {
-      // Reranking is an enhancement, not the source of truth for whether
-      // retrieval works at all (network error, or the timeoutMs race above
-      // lost) — fall through to RRF ordering via the conservative gate below.
-      relevanceById = null;
+    const isLiveRerank = rerank.timeoutMs !== undefined;
+    const rerankCandidatesPool = isLiveRerank
+      ? selectLiveRerankCandidates(candidates)
+      : candidates;
+    const skipRerank =
+      isLiveRerank && hasUnambiguousTopCandidate(rerankCandidatesPool);
+    if (!skipRerank) {
+      try {
+        relevanceById = await rerankCandidates(
+          query,
+          rerankCandidatesPool,
+          userId,
+          rerank.timeoutMs,
+          isLiveRerank ? LIVE_RERANK_MODEL : DEFAULT_RERANK_MODEL,
+          isLiveRerank ? LIVE_RERANK_SERVICE_TIER : undefined,
+        );
+      } catch {
+        // Reranking is an enhancement, not the source of truth for whether
+        // retrieval works at all (network error, or the timeoutMs race above
+        // lost) — fall through to RRF ordering via the conservative gate below.
+        relevanceById = null;
+      }
     }
   }
   timer?.mark("rerank");
