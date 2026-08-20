@@ -7,6 +7,7 @@ import {
   emptyRetrievalUsage,
   hybridRetrieve,
   type RerankMode,
+  type RetrievalResult,
 } from "@/lib/retrieval";
 import { getOwnContextSpaceId } from "@/lib/supabase/context-space";
 import { corsJson, corsPreflight } from "@/lib/cors";
@@ -223,35 +224,42 @@ export async function POST(request: Request) {
         rerank: liveRerank,
         timer: useTimer,
       });
-    // Timer only passed on the first attempt — hybridRetrieve's phase marks
-    // (embedding/rpc_candidates/rerank) would otherwise overwrite themselves
-    // on a fallback retry. total_ms still covers both attempts either way.
+    // Both attempts always rerank now (see the git history of this file for
+    // why the active-context probe used to skip it — that heuristic fired
+    // on 65% of real requests, not the rare case it was meant for).
     //
-    // Both attempts now always rerank (previously the first, active-context
-    // attempt skipped it to save a round trip, and fell back whenever none
-    // of its results had an FTS hit). Production data showed that heuristic
-    // firing on 19 of 29 real calls (65%) — not the rare case it was meant
-    // for. retrieval.ts's DEFAULT_MIN_RELEVANCE comment already documents
-    // why: for this embedding model on short German facts, a genuinely
-    // correct match can score as low as 0.363 similarity with zero lexical
-    // overlap ("simple" FTS has no stemming, "wohne" never matches "lebt").
-    // "No FTS hit" is therefore not a reliable "this was wrong" signal, and
-    // using it as one meant most active-context calls paid for a full,
-    // redundant second hybridRetrieve (embedding + 4 RPCs + rerank) even
-    // when the first attempt already had the right answer. Reranking the
-    // first attempt too costs one extra LLM call on every request, but
-    // trusted relevance_score (see the "trusted on its own against
-    // minScore" comment in retrieval.ts) replaces the unreliable proxy —
-    // net latency win given the fallback was firing on most requests.
-    let retrieval = await retrieve(contextId, timer);
+    // The scoped and full-Context-Space searches now run in PARALLEL rather
+    // than sequentially-on-demand: a genuine fallback (the active context
+    // has nothing relevant) previously meant two full hybridRetrieve passes
+    // back to back — embedding + 4 RPCs + rerank, twice — which measured at
+    // 7-9s in production. Running both concurrently caps that at roughly
+    // the slower of the two instead of their sum. The trade-off is cost,
+    // not just latency: every scoped request now always pays for 2x
+    // embedding + 2x rerank calls, not only when a fallback turns out to be
+    // needed — see /usage if that ratio needs revisiting later.
+    //
+    // Only the scoped call gets the timer — hybridRetrieve's phase marks
+    // (embedding/rpc_candidates/rerank) would interleave nondeterministically
+    // between two truly concurrent calls otherwise. total_ms still covers
+    // the full parallel wait either way. The "fallback_retrieve" mark now
+    // measures how much longer the full-space call took beyond the scoped
+    // one (Promise.all's tail), not a second sequential round trip.
+    let retrieval: RetrievalResult;
     let fellBackToContextSpace = false;
-    // Falls back for both scope kinds now — an explicit context_name is
-    // still tried first (respects a real user-stated focus), but an empty
-    // result there no longer dead-ends the turn; see the comment above.
-    if (contextId && retrieval.sources.length === 0) {
-      retrieval = await retrieve();
+    if (contextId) {
+      const [scoped, full] = await Promise.all([
+        retrieve(contextId, timer),
+        retrieve(),
+      ]);
       timer.mark("fallback_retrieve");
-      fellBackToContextSpace = true;
+      if (scoped.sources.length > 0) {
+        retrieval = scoped;
+      } else {
+        retrieval = full;
+        fellBackToContextSpace = true;
+      }
+    } else {
+      retrieval = await retrieve(undefined, timer);
     }
     await logPerf(supabase, {
       route: "/api/retrieve",
