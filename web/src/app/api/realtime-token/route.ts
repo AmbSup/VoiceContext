@@ -406,6 +406,16 @@ export async function POST(request: Request) {
             // Revisit if OpenAI fixes semantic_vad's reliability.
             turn_detection: {
               type: "server_vad",
+              // Backchannel ("mhm", "ja", "genau") vs. a real interruption
+              // is NOT something client code can distinguish here:
+              // server_vad triggers interrupt_response on any detected
+              // speech onset above threshold, full stop — an OpenAI-
+              // server-side binary behavior, not something this app
+              // controls or can override beyond tuning threshold/
+              // prefix_padding_ms/silence_duration_ms below. Stated
+              // architectural limit of the turn-based Realtime API, not a
+              // gap in this app's barge-in handling.
+              //
               // 0.5 produced several 600-700 ms turns with empty transcripts
               // in a real mobile session. Require a clearer speech signal.
               threshold: 0.65,
